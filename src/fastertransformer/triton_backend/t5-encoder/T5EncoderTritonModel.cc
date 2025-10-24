@@ -143,7 +143,7 @@ std::unique_ptr<AbstractTransformerModelInstance> T5EncoderTritonModel<T>::creat
     std::pair<std::vector<ft::NcclParam>, std::vector<ft::NcclParam>> nccl_params,
     std::shared_ptr<ft::AbstractCustomComm>                           custom_all_reduce_comm)
 {
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
     const int comms_rank = device_id % (tensor_para_size_ * pipeline_para_size_);
 
     std::unique_ptr<ft::Allocator<ft::AllocatorType::CUDA>> allocator(
@@ -164,7 +164,7 @@ std::unique_ptr<AbstractTransformerModelInstance> T5EncoderTritonModel<T>::creat
         cublas_handle, cublaslt_handle, stream, cublas_algo_map.get(), cublas_wrapper_mutex.get(), allocator.get()));
 
     std::unique_ptr<cudaDeviceProp> cuda_device_prop_ptr(new cudaDeviceProp);
-    ft::check_cuda_error(cudaGetDeviceProperties(cuda_device_prop_ptr.get(), device_id));
+    check_cuda_error(cudaGetDeviceProperties(cuda_device_prop_ptr.get(), device_id));
 
     if (std::is_same<T, half>::value) {
         cublas_wrapper->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
@@ -231,7 +231,7 @@ std::unique_ptr<AbstractTransformerModelInstance> T5EncoderTritonModel<T>::creat
 template<typename T>
 void T5EncoderTritonModel<T>::createSharedWeights(int device_id, int rank)
 {
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
     const int tensor_para_rank   = rank % tensor_para_size_;
     const int pipeline_para_rank = rank / tensor_para_size_;
 

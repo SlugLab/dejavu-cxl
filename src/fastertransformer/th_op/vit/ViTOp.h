@@ -86,7 +86,7 @@ public:
                     head_dim_,
                     inter_size_,
                     layer_num_);
-        ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+        check_cuda_error(cublasLtCreate(&cublaslt_handle_));
         checkCUDNN(cudnnCreate(&cudnn_handle_));
         sm_ = ft::getSMVersion();
 
@@ -128,7 +128,7 @@ public:
 
     ~VisionTransformerFunc() override
     {
-        ft::check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+        check_cuda_error(cublasLtDestroy(cublaslt_handle_));
         checkCUDNN(cudnnDestroy(cudnn_handle_));
         delete cublas_algo_map_;
         delete cublas_wrapper_mutex_;

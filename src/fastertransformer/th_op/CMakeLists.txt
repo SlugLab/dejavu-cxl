@@ -53,8 +53,22 @@ add_library(th_transformer SHARED
             $<TARGET_OBJECTS:th_t5>
             $<TARGET_OBJECTS:th_utils>
             $<TARGET_OBJECTS:th_vit>
+            # Pull in FT model objects directly to resolve template symbols at link time
+            $<TARGET_OBJECTS:ParallelGptContextDecoder>
+            # Ensure cublas host symbols are present in this .so
+            $<TARGET_OBJECTS:cublasAlgoMap>
+            # Force instantiation of ParallelGptContextDecoder symbols into this .so
+            ${CMAKE_CURRENT_LIST_DIR}/force_pgcd_inst.cc
+            # Force-emit cublasMMWrapper into this .so
+            ${CMAKE_CURRENT_LIST_DIR}/force_cublas_wrapper_inst.cc
 )
 target_link_libraries(th_transformer PUBLIC torch
+                      -lgrpc
+                      # Link core FT GPT libs explicitly since th_parallel_gpt is an OBJECT library
+                      ParallelGptDecoderLayerWeight
+                      ParallelGptDecoder
+                      ParallelGptContextDecoder
+                      ParallelGpt
                       th_bart
                       th_bert
                       th_common
@@ -64,7 +78,6 @@ target_link_libraries(th_transformer PUBLIC torch
                       th_encoder
                       th_gather_tree
                       th_longformer
-                      th_parallel_gpt
                       th_dv_controller
                       th_gptneox
                       th_swintransformer
@@ -72,6 +85,9 @@ target_link_libraries(th_transformer PUBLIC torch
                       th_utils
                       th_vit
 )
+
+# Ensure linker does not garbage-collect static initializer sections for registrars
+target_link_options(th_transformer PUBLIC "-Wl,--no-gc-sections" "-Wl,--no-as-needed")
 
 if(ENABLE_FP8)
 add_subdirectory(gpt_fp8)

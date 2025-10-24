@@ -78,12 +78,12 @@ public:
         pipeline_para_size_(pipeline_para_size)
     {
         ftNcclInitialize(tensor_para_, pipeline_para_, pipeline_para_, tensor_para_size_, pipeline_para_size_, 0, 0, 0, 0);
-        ft::check_cuda_error(cublasLtCreate(&cublasltHandle_));
+        check_cuda_error(cublasLtCreate(&cublasltHandle_));
 
         cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG, "");
         cublas_wrapper_mutex_ = new std::mutex();
 
-        ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+        check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
 
         const size_t hidden_units = head_num_ * size_per_head_;
         gpt_weights_              = new ft::GptFP8Weight<T1, T2>(hidden_units,
@@ -154,7 +154,7 @@ public:
         cublas_wrapper.setGemmConfig(CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F);
 
         struct cudaDeviceProp prop;
-        ft::check_cuda_error(cudaGetDeviceProperties(&prop, 0));
+        check_cuda_error(cudaGetDeviceProperties(&prop, 0));
 
         // Need to remove them in the future.
         ft::GptFP8<T1, T2> gpt = ft::GptFP8<__nv_fp8_e4m3, __nv_bfloat16>(beam_width,

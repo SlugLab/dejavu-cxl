@@ -47,8 +47,8 @@ public:
     explicit BaseOp(tf::OpKernelConstruction* context): tf::OpKernel(context)
     {
         try {
-            ft::check_cuda_error(cublasCreate(&cublas_handle_));
-            ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+            check_cuda_error(cublasCreate(&cublas_handle_));
+            check_cuda_error(cublasLtCreate(&cublaslt_handle_));
             cublas_wrapper_mutex_ = new std::mutex();
         }
         catch (std::runtime_error& error) {
@@ -58,8 +58,8 @@ public:
 
     ~BaseOp()
     {
-        ft::check_cuda_error(cublasDestroy(cublas_handle_));
-        ft::check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+        check_cuda_error(cublasDestroy(cublas_handle_));
+        check_cuda_error(cublasLtDestroy(cublaslt_handle_));
         delete cublas_wrapper_mutex_;
     }
 

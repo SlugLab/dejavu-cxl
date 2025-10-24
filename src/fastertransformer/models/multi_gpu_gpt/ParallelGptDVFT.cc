@@ -3919,6 +3919,211 @@ void ParallelGptDVFT<T>::reset()
 
 }
 
+// MoE Token Stream Fault Tolerance Implementation
+
+template<typename T>
+void ParallelGptDVFT<T>::initializeMoETokenFT(bool enable, size_t checkpoint_interval)
+{
+    enable_moe_token_ft_ = enable;
+    moe_checkpoint_interval_ = checkpoint_interval;
+
+    if (!enable) {
+        FT_LOG_INFO("MoE Token FT disabled");
+        return;
+    }
+
+    // Only enable for MoE models
+    if (expert_num_ == 0 || moe_k_ == 0) {
+        FT_LOG_WARNING("MoE Token FT requested but model is not MoE (expert_num=%zu, moe_k=%zu)",
+                      expert_num_, moe_k_);
+        enable_moe_token_ft_ = false;
+        return;
+    }
+
+    FT_LOG_INFO("Initializing MoE Token FT: experts=%zu, k=%zu, checkpoint_interval=%zu",
+                expert_num_, moe_k_, checkpoint_interval);
+
+    // Create MoE Token FT Manager
+    moe_token_ft_manager_ = new MoETokenFTManager(
+        expert_num_,
+        moe_k_,
+        hidden_units_,
+        checkpoint_interval,
+        100  // max checkpoints
+    );
+
+    // Create recovery helper
+    token_recovery_helper_ = new TokenStreamRecoveryHelper(moe_token_ft_manager_);
+
+    // Create adaptive checkpoint policy
+    adaptive_checkpoint_ = new AdaptiveCheckpointPolicy(expert_num_, moe_k_);
+
+    FT_LOG_INFO("MoE Token FT initialized successfully");
+}
+
+template<typename T>
+void ParallelGptDVFT<T>::shutdownMoETokenFT()
+{
+    if (!enable_moe_token_ft_) {
+        return;
+    }
+
+    FT_LOG_INFO("Shutting down MoE Token FT");
+
+    if (moe_token_ft_manager_ != nullptr) {
+        delete moe_token_ft_manager_;
+        moe_token_ft_manager_ = nullptr;
+    }
+
+    if (token_recovery_helper_ != nullptr) {
+        delete token_recovery_helper_;
+        token_recovery_helper_ = nullptr;
+    }
+
+    if (adaptive_checkpoint_ != nullptr) {
+        delete adaptive_checkpoint_;
+        adaptive_checkpoint_ = nullptr;
+    }
+
+    enable_moe_token_ft_ = false;
+    FT_LOG_INFO("MoE Token FT shutdown complete");
+}
+
+template<typename T>
+void ParallelGptDVFT<T>::checkpointMoEToken(int token_id,
+                                           int step,
+                                           int ubatch_id,
+                                           const int* expert_indices,
+                                           const float* expert_weights,
+                                           const void* expert_activations,
+                                           size_t activation_size)
+{
+    if (!enable_moe_token_ft_ || moe_token_ft_manager_ == nullptr) {
+        return;
+    }
+
+    PUSH_RANGE("MoE Token Checkpoint");
+
+    // Create checkpoint asynchronously
+    moe_token_ft_manager_->createCheckpoint(
+        token_id,
+        step,
+        ubatch_id,
+        expert_indices,
+        expert_weights,
+        expert_activations,
+        activation_size,
+        stream_
+    );
+
+    POP_RANGE;
+
+    FT_LOG_DEBUG("Checkpointed MoE token: step=%d, ubatch=%d, token=%d",
+                step, ubatch_id, token_id);
+}
+
+template<typename T>
+bool ParallelGptDVFT<T>::recoverMoEToken(int step,
+                                        int ubatch_id,
+                                        int token_id,
+                                        int* expert_indices,
+                                        float* expert_weights,
+                                        void* expert_activations)
+{
+    if (!enable_moe_token_ft_ || moe_token_ft_manager_ == nullptr) {
+        FT_LOG_ERROR("Cannot recover: MoE Token FT not enabled");
+        return false;
+    }
+
+    PUSH_RANGE("MoE Token Recovery");
+
+    bool success = moe_token_ft_manager_->restoreFromCheckpoint(
+        step,
+        ubatch_id,
+        token_id,
+        expert_indices,
+        expert_weights,
+        expert_activations,
+        stream_
+    );
+
+    POP_RANGE;
+
+    if (success) {
+        FT_LOG_INFO("Recovered MoE token: step=%d, ubatch=%d, token=%d",
+                   step, ubatch_id, token_id);
+    } else {
+        FT_LOG_ERROR("Failed to recover MoE token: step=%d, ubatch=%d, token=%d",
+                    step, ubatch_id, token_id);
+    }
+
+    return success;
+}
+
+template<typename T>
+void ParallelGptDVFT<T>::handleMoEFailure(int failed_step, int ubatch_id)
+{
+    if (!enable_moe_token_ft_ || token_recovery_helper_ == nullptr) {
+        FT_LOG_ERROR("Cannot handle failure: MoE Token FT not enabled");
+        return;
+    }
+
+    FT_LOG_WARNING("Handling MoE failure at step=%d, ubatch=%d", failed_step, ubatch_id);
+
+    // Find last valid checkpoint before failure
+    int recovery_step = failed_step - 1;
+    while (recovery_step >= 0 && !moe_token_ft_manager_->hasCheckpoint(recovery_step, ubatch_id)) {
+        recovery_step--;
+    }
+
+    if (recovery_step < 0) {
+        FT_LOG_ERROR("No valid checkpoint found for recovery");
+        return;
+    }
+
+    FT_LOG_INFO("Initiating recovery from step %d", recovery_step);
+
+    // Start recovery process
+    bool recovery_started = token_recovery_helper_->startRecovery(ubatch_id, recovery_step);
+
+    if (!recovery_started) {
+        FT_LOG_ERROR("Failed to start recovery");
+        return;
+    }
+
+    // Update ubatch state to recovery mode
+    ubatch_step_restart_[ubatch_id] = recovery_step;
+    ubatch_step_[ubatch_id] = recovery_step;
+
+    FT_LOG_INFO("MoE failure handling initiated, will recover from step %d", recovery_step);
+}
+
+template<typename T>
+void ParallelGptDVFT<T>::completeMoERecovery()
+{
+    if (!enable_moe_token_ft_ || token_recovery_helper_ == nullptr) {
+        return;
+    }
+
+    moe_token_ft_manager_->completeRecovery();
+
+    FT_LOG_INFO("MoE recovery completed successfully");
+}
+
+template<typename T>
+void ParallelGptDVFT<T>::printMoETokenFTStats() const
+{
+    if (!enable_moe_token_ft_ || moe_token_ft_manager_ == nullptr) {
+        FT_LOG_INFO("MoE Token FT is not enabled");
+        return;
+    }
+
+    moe_token_ft_manager_->printCheckpointStats();
+
+    size_t memory_usage = moe_token_ft_manager_->getMemoryUsage();
+    FT_LOG_INFO("MoE Token FT memory usage: %zu MB", memory_usage / (1024 * 1024));
+}
+
 template class ParallelGptDVFT<float>;
 template class ParallelGptDVFT<half>;
 #ifdef ENABLE_BF16

@@ -192,7 +192,7 @@ public:
 
             sm_              = ft::getSMVersion();
             cublas_algo_map_ = new ft::cublasAlgoMap("gemm_config.in");
-            ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+            check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
         }
         catch (std::runtime_error& error) {
             OP_REQUIRES(context, false, tf::errors::Internal(error.what()));

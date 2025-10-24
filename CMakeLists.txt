@@ -16,7 +16,8 @@ project(FasterTransformer LANGUAGES CXX CUDA)
 
 set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 
-include_directories(BEFORE ${PROJECT_SOURCE_DIR}/third_party/protobuf/include)
+# Use system Protobuf headers discovered by find_package(Protobuf)
+# Avoid vendored headers to prevent ABI mismatches with the linked libprotobuf.
 
 find_package(CUDA 10.2 REQUIRED)
 
@@ -103,6 +104,22 @@ endif()
 set(Torch_USE_STATIC_LIBS OFF)
 list(APPEND CMAKE_PREFIX_PATH /usr/local/lib/python3.12/dist-packages/torch)
 find_package(Torch REQUIRED)
+
+# Extract PyTorch include directories and mark them as system includes
+# This prevents PyTorch's bundled protobuf from conflicting with system protobuf
+if(Torch_FOUND)
+  get_target_property(TORCH_INCLUDES torch INTERFACE_INCLUDE_DIRECTORIES)
+  if(TORCH_INCLUDES)
+    message(STATUS "Original TORCH_INCLUDES: ${TORCH_INCLUDES}")
+    # Remove from interface includes
+    set_property(TARGET torch PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
+    # Add back as system includes (lower priority)
+    foreach(TORCH_INCLUDE_DIR ${TORCH_INCLUDES})
+      include_directories(SYSTEM ${TORCH_INCLUDE_DIR})
+    endforeach()
+  endif()
+endif()
+
 if(Torch_FOUND AND TARGET torch AND NOT TARGET Torch::Torch)
   add_library(Torch::Torch INTERFACE IMPORTED)
   set_property(TARGET Torch::Torch PROPERTY INTERFACE_LINK_LIBRARIES torch)
@@ -145,6 +162,7 @@ if(USE_NVTX)
 endif()
 
 # setting compiler flags
+# Prioritize system protobuf headers over PyTorch's bundled ones
 set(CMAKE_C_FLAGS    "${CMAKE_C_FLAGS}")
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -std=c++17")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall -ldl") # -Xptxas -v
@@ -193,10 +211,10 @@ if(NOT (FIND_SM STREQUAL True))
   set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS}  -DWMMA")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DWMMA")
   if(BUILD_PYT)
-    set(ENV{TORCH_CUDA_ARCH_LIST} "7.0;7.5;8.0;8.6")
+    set(ENV{TORCH_CUDA_ARCH_LIST} "9.0")
   endif()
-  set(CMAKE_CUDA_ARCHITECTURES 70 75 80 86)
-  message("-- Assign GPU architecture (sm=70,75,80,86)")
+  set(CMAKE_CUDA_ARCHITECTURES 90)
+  message("-- Assign GPU architecture (sm=90)")
 endif()
 
 if(BUILD_PYT)
@@ -337,6 +355,8 @@ if(USE_TRITONSERVER_DATATYPE)
 endif()
 
 include_directories(BEFORE ${Protobuf_INCLUDE_DIRS})
+# Explicitly exclude PyTorch's bundled protobuf headers to avoid version conflicts
+include_directories(BEFORE SYSTEM /usr/local/include)
 include_directories(
   ${COMMON_HEADER_DIRS}
 )
@@ -369,7 +389,6 @@ add_library(transformer-shared SHARED
   $<TARGET_OBJECTS:BertLayerWeight>
   $<TARGET_OBJECTS:BertTritonBackend>
   $<TARGET_OBJECTS:BertWeight>
-  $<TARGET_OBJECTS:DecoderCrossAttentionLayer>
   $<TARGET_OBJECTS:DecoderSelfAttentionLayer>
   $<TARGET_OBJECTS:DynamicDecodeLayer>
   $<TARGET_OBJECTS:FfnLayer>
@@ -445,12 +464,10 @@ add_library(transformer-shared SHARED
   $<TARGET_OBJECTS:layout_transformer_int8_kernels>
   $<TARGET_OBJECTS:logprob_kernels>
   $<TARGET_OBJECTS:logger>
-  $<TARGET_OBJECTS:longformer_kernels>
   $<TARGET_OBJECTS:matrix_transpose_kernels>
   $<TARGET_OBJECTS:matrix_vector_multiplication>
   $<TARGET_OBJECTS:memory_utils>
   $<TARGET_OBJECTS:moe_gemm_kernels>
-  $<TARGET_OBJECTS:moe_kernels>
   $<TARGET_OBJECTS:mpi_utils>
   $<TARGET_OBJECTS:nccl_utils>
   $<TARGET_OBJECTS:nvtx_utils>

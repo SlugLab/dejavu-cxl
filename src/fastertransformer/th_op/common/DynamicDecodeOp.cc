@@ -34,7 +34,7 @@ FtDynamicDecode<T>::FtDynamicDecode(const size_t vocab_size,
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, pipeline_para_, tensor_para_size, pipeline_para_size, 0, 0, 0, 0);
 
     allocator_ = new ft::Allocator<ft::AllocatorType::TH>();
-    ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_wrapper_mutex_ = new std::mutex();
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
 
@@ -45,7 +45,7 @@ FtDynamicDecode<T>::FtDynamicDecode(const size_t vocab_size,
         cublas_handle, cublaslt_handle_, stream, cublas_algo_map_, cublas_wrapper_mutex_, allocator_);
 
     cudaDeviceProp prop;
-    ft::check_cuda_error(cudaGetDeviceProperties(&prop, 0));
+    check_cuda_error(cudaGetDeviceProperties(&prop, 0));
 
     dynamic_decode_layer_ = new ft::DynamicDecodeLayer<T>(
         vocab_size_, vocab_size_padded_, 0, stream, cublas_wrapper_, allocator_, false, &prop_);

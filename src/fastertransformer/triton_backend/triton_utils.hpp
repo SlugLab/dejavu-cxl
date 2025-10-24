@@ -38,7 +38,7 @@ void move_tensor_H2D(const triton::Tensor&                                      
     cudaStream_t stream = (*allocator)->returnStream();
 
     d_ptr = (T*)((*allocator)->reMalloc(d_ptr, sizeof(T) * tensor_size, false));
-    ft::check_cuda_error(cudaMemcpyAsync(d_ptr, (T*)tensor.data, sizeof(T) * tensor_size, cudaMemcpyDefault, stream));
+    check_cuda_error(cudaMemcpyAsync(d_ptr, (T*)tensor.data, sizeof(T) * tensor_size, cudaMemcpyDefault, stream));
 }
 
 template<typename T>

@@ -74,7 +74,7 @@ public:
         weights_(weights)
     {
 
-        ft::check_cuda_error(cublasLtCreate(&cublasltHandle_));
+        check_cuda_error(cublasLtCreate(&cublasltHandle_));
         if (sparse) {
 #ifdef SPARSITY_ENABLED
             CHECK_CUSPARSE(cusparseLtInit(&cusparseLtHandle_));
@@ -187,7 +187,7 @@ public:
         }
 #endif
 
-        ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+        check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
     }
 
     ~FTGpt() override

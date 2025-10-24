@@ -63,7 +63,6 @@ __launch_bounds__(TPB) __global__ void moe_softmax(const T* input, const bool* f
 
     const int thread_row_offset = blockIdx.x * num_cols;
 
-    cub::Sum sum;
     float    threadData(-FLT_MAX);
 
     // Don't touch finished rows.
@@ -76,7 +75,8 @@ __launch_bounds__(TPB) __global__ void moe_softmax(const T* input, const bool* f
         threadData    = max(static_cast<float>(input[idx]), threadData);
     }
 
-    const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+    auto max_op = [](float a, float b) { return max(a, b); };
+    const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, max_op);
     if (threadIdx.x == 0) {
         float_max = maxElem;
     }
@@ -89,7 +89,8 @@ __launch_bounds__(TPB) __global__ void moe_softmax(const T* input, const bool* f
         threadData += exp((static_cast<float>(input[idx]) - float_max));
     }
 
-    const auto Z = BlockReduce(tmpStorage).Reduce(threadData, sum);
+    auto sum_op = [](float a, float b) { return a + b; };
+    const auto Z = BlockReduce(tmpStorage).Reduce(threadData, sum_op);
 
     if (threadIdx.x == 0) {
         normalizing_factor = 1.f / Z;

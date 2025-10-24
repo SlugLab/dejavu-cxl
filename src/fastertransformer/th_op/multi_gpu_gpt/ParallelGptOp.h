@@ -128,13 +128,13 @@ public:
         is_restart_(is_restart)
     {
 
-        ft::check_cuda_error(cublasLtCreate(&cublasltHandle_));
+        check_cuda_error(cublasLtCreate(&cublasltHandle_));
         cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
         cublas_wrapper_mutex_ = new std::mutex();
 
         int device_id = 0;
-        ft::check_cuda_error(cudaGetDevice(&device_id));
-        ft::check_cuda_error(cudaGetDeviceProperties(&prop_, device_id));
+        check_cuda_error(cudaGetDevice(&device_id));
+        check_cuda_error(cudaGetDeviceProperties(&prop_, device_id));
         printf("-------------- Device %d\n", device_id);
 
         bool with_mpi = true;
@@ -346,17 +346,22 @@ public:
 
     void cleanup() override
     {
+        // Only DV/FT variants expose comp_done_ and reset().
+#if defined(MICROBENCHMARKS) || defined(MICROBATCH_INJECTION) || defined(TEST_FAILURES) || defined(SEPERATE_PROMPT)
         gpt_ptr->comp_done_ = true;
 #ifdef TEST_FAILURES
         nccl_monitor_thread_.join();
         printf("NCCL JOINED\n");
 #endif
         gpt_ptr->reset();
+#else
+        // No-op for baseline ParallelGpt
+#endif
     }
 
     void reset() override
     {
-#ifdef TEST_FAILURES
+#if defined(TEST_FAILURES)
         printf("INSIDE RESET\n");
         if (!reset_after_failure_ && gpt_ptr != NULL) {
             nccl_monitor_thread_.join();
@@ -643,6 +648,7 @@ public:
                                              1.0f,  // len_penalty,
                                              1.0f,  // repetition_penalty,
                                              tensor_para_,
+                                             pipeline_para_,
                                              cache_stream_para_,
                                              stream,
                                              &cublas_wrapper,
@@ -660,8 +666,28 @@ public:
 
         std::vector<uint32_t> output_seq_len(request_batch_size, total_output_len);
         if (ubatch_output_lengths.has_value()) {
-            for (int i = 0; i < request_batch_size; i++)
-                output_seq_len[i] = ubatch_output_lengths.value()[i].item<int>() + max_input_length;
+            auto t = ubatch_output_lengths.value();
+            const int64_t n = t.numel();
+            if (n == request_batch_size) {
+                for (int i = 0; i < request_batch_size; i++) {
+                    output_seq_len[i] = t[i].item<int>() + max_input_length;
+                }
+            }
+            else if (n > 0 && (request_batch_size % n) == 0) {
+                // Interpret as one length per microbatch; replicate across each microbatch's items
+                const int ubatch_size = request_batch_size / static_cast<int>(n);
+                for (int i = 0; i < request_batch_size; i++) {
+                    const int m        = i / ubatch_size;
+                    output_seq_len[i] = t[m].item<int>() + max_input_length;
+                }
+            }
+            else if (n > 0) {
+                // Fallback: broadcast the first element
+                const int val = t[0].item<int>();
+                for (int i = 0; i < request_batch_size; i++) {
+                    output_seq_len[i] = val + max_input_length;
+                }
+            }
         }
         std::unordered_map<std::string, ft::Tensor> input_tensors = std::unordered_map<std::string, ft::Tensor>{
             {"input_ids",
@@ -917,6 +943,110 @@ public:
                                th::optional<th::Tensor> ubatch_output_lengths,
                                th::optional<th::Tensor> ubatch_ids,
                                th::optional<int64_t>    return_cum_log_probs_opt);
+
+    // Compatibility overload: accept Python scalars for runtime knobs
+    vector<th::Tensor> forward(th::Tensor                  input_ids,
+                               th::Tensor                  input_lengths,
+                               const int64_t               output_len,
+                               th::optional<th::Tensor>    reload,
+                               th::optional<th::Tensor>    streaming,
+                               th::optional<th::Tensor>    swapping,
+                               th::optional<int64_t>       beam_width_opt,
+                               c10::optional<int64_t>      top_k_i,
+                               c10::optional<double>       top_p_f,
+                               c10::optional<double>       beam_search_diversity_rate_f,
+                               c10::optional<double>       temperature_f,
+                               c10::optional<double>       len_penalty_f,
+                               c10::optional<double>       repetition_penalty_f,
+                               c10::optional<double>       presence_penalty_f,
+                               c10::optional<int64_t>      min_length_i,
+                               c10::optional<int64_t>      random_seed_i,
+                               th::optional<th::Tensor>    bad_words_list_opt,
+                               th::optional<th::Tensor>    finished_opt,
+                               th::optional<th::Tensor>    ubatch_output_lengths,
+                               th::optional<th::Tensor>    ubatch_ids,
+                               th::optional<int64_t>       return_cum_log_probs_opt)
+    {
+        th::optional<th::Tensor> top_k_opt;
+        th::optional<th::Tensor> top_p_opt;
+        th::optional<th::Tensor> beam_search_diversity_rate_opt;
+        th::optional<th::Tensor> temperature_opt;
+        th::optional<th::Tensor> len_penalty_opt;
+        th::optional<th::Tensor> repetition_penalty_opt;
+        th::optional<th::Tensor> presence_penalty_opt;
+        th::optional<th::Tensor> min_length_opt;
+        th::optional<th::Tensor> random_seed_opt;
+
+        auto to_tensor_f32 = [](double v) {
+            return torch::tensor({static_cast<float>(v)}, torch::dtype(torch::kFloat32));
+        };
+        auto to_tensor_i32 = [](int64_t v) {
+            return torch::tensor({static_cast<int32_t>(v)}, torch::dtype(torch::kInt32));
+        };
+        auto to_tensor_i64 = [](int64_t v) {
+            return torch::tensor({static_cast<int64_t>(v)}, torch::dtype(torch::kInt64));
+        };
+
+        th::Tensor tmp;
+        if (top_k_i.has_value()) {
+            tmp      = to_tensor_i32(top_k_i.value());
+            top_k_opt = tmp;
+        }
+        if (top_p_f.has_value()) {
+            tmp      = to_tensor_f32(top_p_f.value());
+            top_p_opt = tmp;
+        }
+        if (beam_search_diversity_rate_f.has_value()) {
+            tmp                          = to_tensor_f32(beam_search_diversity_rate_f.value());
+            beam_search_diversity_rate_opt = tmp;
+        }
+        if (temperature_f.has_value()) {
+            tmp            = to_tensor_f32(temperature_f.value());
+            temperature_opt = tmp;
+        }
+        if (len_penalty_f.has_value()) {
+            tmp          = to_tensor_f32(len_penalty_f.value());
+            len_penalty_opt = tmp;
+        }
+        if (repetition_penalty_f.has_value()) {
+            tmp                 = to_tensor_f32(repetition_penalty_f.value());
+            repetition_penalty_opt = tmp;
+        }
+        if (presence_penalty_f.has_value()) {
+            tmp              = to_tensor_f32(presence_penalty_f.value());
+            presence_penalty_opt = tmp;
+        }
+        if (min_length_i.has_value()) {
+            tmp          = to_tensor_i32(min_length_i.value());
+            min_length_opt = tmp;
+        }
+        if (random_seed_i.has_value()) {
+            tmp            = to_tensor_i64(random_seed_i.value());
+            random_seed_opt = tmp;
+        }
+
+        return forward(input_ids,
+                       input_lengths,
+                       output_len,
+                       reload,
+                       streaming,
+                       swapping,
+                       beam_width_opt,
+                       top_k_opt,
+                       top_p_opt,
+                       beam_search_diversity_rate_opt,
+                       temperature_opt,
+                       len_penalty_opt,
+                       repetition_penalty_opt,
+                       presence_penalty_opt,
+                       min_length_opt,
+                       random_seed_opt,
+                       bad_words_list_opt,
+                       finished_opt,
+                       ubatch_output_lengths,
+                       ubatch_ids,
+                       return_cum_log_probs_opt);
+    }
 
     void cleanup();
     void reset();

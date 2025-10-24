@@ -38,7 +38,7 @@ broadcastRequest(const std::vector<T>&   h_input_hidden_state,
 {
     std::vector<std::shared_ptr<std::unordered_map<std::string, triton::Tensor>>> request_list;
     for (int device_id = 0; device_id < gpu_count; device_id++) {
-        ft::check_cuda_error(cudaSetDevice(device_id));
+        check_cuda_error(cudaSetDevice(device_id));
 
         T*   d_input_hidden_state;
         int* d_input_seq_len;
@@ -123,9 +123,9 @@ int threadCreateModelInstances(std::shared_ptr<AbstractTransformerModel>        
                                std::pair<std::vector<ft::NcclParam>, std::vector<ft::NcclParam>> nccl_params,
                                std::shared_ptr<ft::AbstractCustomComm> custom_all_reduce_comm = nullptr)
 {
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
     cudaStream_t stream;
-    ft::check_cuda_error(cudaStreamCreate(&stream));
+    check_cuda_error(cudaStreamCreate(&stream));
     model->createSharedWeights(device_id, rank);
     auto model_instance = model->createModelInstance(device_id, rank, stream, nccl_params, custom_all_reduce_comm);
     model_instances->at(device_id) = std::move(model_instance);
@@ -139,7 +139,7 @@ int threadForward(std::unique_ptr<AbstractTransformerModelInstance>*            
                   std::shared_ptr<std::unordered_map<std::string, triton::Tensor>>* output_tensors,
                   const int                                                         device_id)
 {
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
     *output_tensors = (*model_instance)->forward(request);
     return 0;
 }

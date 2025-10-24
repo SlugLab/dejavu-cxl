@@ -75,8 +75,8 @@ public:
         params_(ft::ViTINT8Weight<T>(
             embed_dim, inter_size, layer_num, img_size, patch_size, in_chans, with_cls_token, false))
     {
-        ft::check_cuda_error(cublasCreate(&cublas_handle_));
-        ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+        check_cuda_error(cublasCreate(&cublas_handle_));
+        check_cuda_error(cublasLtCreate(&cublaslt_handle_));
         checkCUDNN(cudnnCreate(&cudnn_handle_));
         sm_ = ft::getSMVersion();
 
@@ -135,8 +135,8 @@ public:
 
     ~VisionTransformerINT8Func() override
     {
-        ft::check_cuda_error(cublasDestroy(cublas_handle_));
-        ft::check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+        check_cuda_error(cublasDestroy(cublas_handle_));
+        check_cuda_error(cublasLtDestroy(cublaslt_handle_));
         checkCUDNN(cudnnDestroy(cudnn_handle_));
         delete cublas_algo_map_;
         delete cublas_wrapper_mutex_;

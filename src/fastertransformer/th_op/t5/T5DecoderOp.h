@@ -74,7 +74,7 @@ public:
         ft::ftNcclInitialize(tensor_para_, pipeline_para_, pipeline_para_, tensor_para_size, pipeline_para_size, 0, 0, 0, 0);
 
         int hidden_dim = _head_num * _head_size;
-        ft::check_cuda_error(cublasLtCreate(&_cublasltHandle));
+        check_cuda_error(cublasLtCreate(&_cublasltHandle));
         cublas_algo_map_ = new ft::cublasAlgoMap("gemm_config.in");
 
         cublas_wrapper_mutex_ = new std::mutex();

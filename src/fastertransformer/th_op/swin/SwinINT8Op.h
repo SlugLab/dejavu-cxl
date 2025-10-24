@@ -85,8 +85,8 @@ public:
         qk_scale_(qk_scale),
         version_(version)
     {
-        ft::check_cuda_error(cublasCreate(&cublas_handle_));
-        ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+        check_cuda_error(cublasCreate(&cublas_handle_));
+        check_cuda_error(cublasLtCreate(&cublaslt_handle_));
         checkCUDNN(cudnnCreate(&cudnn_handle_));
 
         sm_ = ft::getSMVersion();
@@ -163,8 +163,8 @@ public:
 
     ~SwinTransformerINT8Func() override
     {
-        ft::check_cuda_error(cublasDestroy(cublas_handle_));
-        ft::check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+        check_cuda_error(cublasDestroy(cublas_handle_));
+        check_cuda_error(cublasLtDestroy(cublaslt_handle_));
         checkCUDNN(cudnnDestroy(cudnn_handle_));
         delete cublas_algo_map_;
         delete cublas_wrapper_mutex_;

@@ -157,7 +157,7 @@ public:
             OP_REQUIRES_OK(context, context->GetAttr("repetition_penalty", &repetition_penalty_));
             OP_REQUIRES_OK(context, context->GetAttr("return_cum_log_probs", &return_cum_log_probs_));
             cublas_algo_map_ = new ft::cublasAlgoMap("gemm_config.in");
-            ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+            check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
         }
         catch (std::runtime_error& error) {
             OP_REQUIRES(context, false, tf::errors::Internal(error.what()));

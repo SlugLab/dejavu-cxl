@@ -87,7 +87,7 @@ set_property(TARGET ParallelGptContextDecoder PROPERTY CUDA_RESOLVE_DEVICE_SYMBO
 target_link_libraries(ParallelGptContextDecoder PUBLIC -lcudart TensorParallelGeluFfnLayer TensorParallelReluFfnLayer
                                                 TensorParallelGptContextAttentionLayer layernorm_kernels
                                                 add_residual_kernels bert_preprocess_kernels nccl_utils gpt_kernels tensor
-                                                nvtx_utils cuda_utils logger StateStreamServer)
+                                                nvtx_utils cuda_utils logger)
 target_include_directories(ParallelGptContextDecoder BEFORE PUBLIC ${Protobuf_INCLUDE_DIRS})
 
 add_library(ParallelGptDecoder STATIC ParallelGptDecoder.cc)
@@ -107,7 +107,7 @@ target_include_directories(ControllerClient BEFORE PUBLIC ${Protobuf_INCLUDE_DIR
 add_library(ParallelGpt STATIC ParallelGpt.cc)
 set_property(TARGET ParallelGpt PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET ParallelGpt PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
-target_link_libraries(ParallelGpt PUBLIC -lcudart ParallelGptDecoder ParallelGptContextDecoder StateStreamClient decoding_kernels gpt_kernels
+target_link_libraries(ParallelGpt PUBLIC -lcudart ParallelGptDecoder ParallelGptContextDecoder decoding_kernels gpt_kernels
                       DynamicDecodeLayer BaseBeamSearchLayer bert_preprocess_kernels gen_relative_pos_bias ParallelGptWeight
                       custom_ar_comm logprob_kernels cuda_utils logger nvtx_utils cache_utils -lprotobuf -lgrpc -lgrpc++ -lgpr)
 target_include_directories(ParallelGpt BEFORE PUBLIC ${Protobuf_INCLUDE_DIRS})

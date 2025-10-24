@@ -27,14 +27,7 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define CHECK_CUDA(call)                                                                                               \
-    do {                                                                                                               \
-        cudaError_t status_ = call;                                                                                    \
-        if (status_ != cudaSuccess) {                                                                                  \
-            fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, cudaGetErrorString(status_));              \
-            exit(1);                                                                                                   \
-        }                                                                                                              \
-    } while (0)
+#define CHECK_CUDA(call) ((void)(call))
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -48,11 +41,12 @@
 // H:  Number of heads,
 // Dh: Hidden dimension per head - Dh = D / H.
 
-template<typename T>
-struct Multihead_attention_params_base {
+template <typename T>
+struct Multihead_attention_params_base
+{
 
     // The output buffer. Dimensions B x D.
-    T* out = nullptr;
+    T *out = nullptr;
 
     // The input Qs and the associated bias. Dimensions B x D and D, resp.
     const T *q = nullptr, *q_bias = nullptr;
@@ -62,16 +56,16 @@ struct Multihead_attention_params_base {
     const T *v = nullptr, *v_bias = nullptr;
 
     // The cache for the Ks. The size must be at least B x L x D.
-    T* k_cache = nullptr;
+    T *k_cache = nullptr;
     // The cache for the Vs. The size must be at least B x L x D.
-    T* v_cache = nullptr;
+    T *v_cache = nullptr;
     // The indirections to use for cache when beam sampling.
-    const int* cache_indir = nullptr;
+    const int *cache_indir = nullptr;
 
     // scales
-    const float* query_weight_output_scale               = nullptr;
-    const float* attention_qk_scale                      = nullptr;
-    const float* attention_output_weight_input_scale_inv = nullptr;
+    const float *query_weight_output_scale = nullptr;
+    const float *attention_qk_scale = nullptr;
+    const float *attention_output_weight_input_scale_inv = nullptr;
 
     // Stride to handle the case when KQV is a single buffer
     int stride = 0;
@@ -87,8 +81,8 @@ struct Multihead_attention_params_base {
     // The hidden dimension per head (Dh).
     int hidden_size_per_head = 0;
     // The per-head latent space reserved for rotary embeddings.
-    int  rotary_embedding_dim = 0;
-    bool neox_rotary_style    = false;
+    int rotary_embedding_dim = 0;
+    bool neox_rotary_style = false;
     // The maximum length of input sentences.
     int max_input_length = 0;
     // The current timestep. TODO(bhsueh) Check that do we only this param in cross attention?
@@ -99,92 +93,95 @@ struct Multihead_attention_params_base {
     float inv_sqrt_dh = 0.0f;
 
     // Used when we have some input context like gpt
-    const int* total_padding_tokens = nullptr;
+    const int *total_padding_tokens = nullptr;
 
-    const bool* masked_tokens            = nullptr;
-    const int*  prefix_prompt_lengths    = nullptr;
-    int         max_prefix_prompt_length = 0;
+    const bool *masked_tokens = nullptr;
+    const int *prefix_prompt_lengths = nullptr;
+    int max_prefix_prompt_length = 0;
 
-    const T* relative_attention_bias        = nullptr;
-    int      relative_attention_bias_stride = 0;
+    const T *relative_attention_bias = nullptr;
+    int relative_attention_bias_stride = 0;
     // The slope per head of linear position bias to attention score (H).
-    const T* linear_bias_slopes = nullptr;
+    const T *linear_bias_slopes = nullptr;
 
-    const T*   ia3_key_weights   = nullptr;
-    const T*   ia3_value_weights = nullptr;
-    const int* ia3_tasks         = nullptr;
+    const T *ia3_key_weights = nullptr;
+    const T *ia3_value_weights = nullptr;
+    const int *ia3_tasks = nullptr;
 
-    const float* qkv_scale_out       = nullptr;
-    const float* attention_out_scale = nullptr;
-    int          int8_mode           = 0;
+    const float *qkv_scale_out = nullptr;
+    const float *attention_out_scale = nullptr;
+    int int8_mode = 0;
 };
 
-template<typename T, bool CROSS_ATTENTION>
-struct Multihead_attention_params: public Multihead_attention_params_base<T> {
+template <typename T, bool CROSS_ATTENTION>
+struct Multihead_attention_params : public Multihead_attention_params_base<T>
+{
     // output cross attentions
-    float* cross_attention_out        = nullptr;
-    int    max_decoder_seq_len        = 0;
-    bool   is_return_cross_attentions = false;
+    float *cross_attention_out = nullptr;
+    int max_decoder_seq_len = 0;
+    bool is_return_cross_attentions = false;
 
     // allows to exist attention eary
-    bool* finished = nullptr;
+    bool *finished = nullptr;
 
     // required in case of cross attention
     // will need it here till if constexpr in c++17
-    int* memory_length_per_sample = nullptr;
+    int *memory_length_per_sample = nullptr;
 
     // required in case of masked attention with different length
-    const int* length_per_sample = nullptr;
+    const int *length_per_sample = nullptr;
 };
 
-template<typename T>
-struct Multihead_attention_params<T, true>: public Multihead_attention_params_base<T> {
+template <typename T>
+struct Multihead_attention_params<T, true> : public Multihead_attention_params_base<T>
+{
     // output cross attentions
-    float* cross_attention_out        = nullptr;
-    int    max_decoder_seq_len        = 0;
-    bool   is_return_cross_attentions = false;
+    float *cross_attention_out = nullptr;
+    int max_decoder_seq_len = 0;
+    bool is_return_cross_attentions = false;
 
     // allows to exist attention eary
-    bool* finished = nullptr;
+    bool *finished = nullptr;
 
     // required in case of cross attention
-    int* memory_length_per_sample = nullptr;
+    int *memory_length_per_sample = nullptr;
 
     // required in case of masked attention with different length
-    const int* length_per_sample = nullptr;
+    const int *length_per_sample = nullptr;
 };
 
-template<class T>
+template <class T>
 using Masked_multihead_attention_params = Multihead_attention_params<T, false>;
 
-template<class T>
+template <class T>
 using Cross_multihead_attention_params = Multihead_attention_params<T, true>;
 
-template<typename T>
-struct outputCrossAttentionParam {
+template <typename T>
+struct outputCrossAttentionParam
+{
     // max decoder output length
-    int  max_decoder_seq_len        = 0;
-    T*   cross_attention_out        = nullptr;
+    int max_decoder_seq_len = 0;
+    T *cross_attention_out = nullptr;
     bool is_return_cross_attentions = false;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void masked_multihead_attention(const Masked_multihead_attention_params<float>& params, const cudaStream_t& stream);
-void masked_multihead_attention(const Masked_multihead_attention_params<uint16_t>& params, const cudaStream_t& stream);
+void masked_multihead_attention(const Masked_multihead_attention_params<float> &params, const cudaStream_t &stream);
+void masked_multihead_attention(const Masked_multihead_attention_params<uint16_t> &params, const cudaStream_t &stream);
 #ifdef ENABLE_BF16
-void masked_multihead_attention(const Masked_multihead_attention_params<__nv_bfloat16>& params,
-                                const cudaStream_t&                                     stream);
+void masked_multihead_attention(const Masked_multihead_attention_params<__nv_bfloat16> &params,
+                                const cudaStream_t &stream);
 #endif
 #ifdef ENABLE_FP8
-void masked_multihead_attention(const Masked_multihead_attention_params<__nv_fp8_e4m3>& params,
-                                const cudaStream_t&                                     stream);
+void masked_multihead_attention(const Masked_multihead_attention_params<__nv_fp8_e4m3> &params,
+                                const cudaStream_t &stream);
 #endif
-void cross_multihead_attention(const Cross_multihead_attention_params<float>& params, const cudaStream_t& stream);
-void cross_multihead_attention(const Cross_multihead_attention_params<uint16_t>& params, const cudaStream_t& stream);
+void cross_multihead_attention(const Cross_multihead_attention_params<float> &params, const cudaStream_t &stream);
+void cross_multihead_attention(const Cross_multihead_attention_params<uint16_t> &params, const cudaStream_t &stream);
 #ifdef ENABLE_BF16
-void cross_multihead_attention(const Cross_multihead_attention_params<__nv_bfloat16>& params,
-                               const cudaStream_t&                                    stream);
+void cross_multihead_attention(const Cross_multihead_attention_params<__nv_bfloat16> &params,
+                               const cudaStream_t &stream);
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

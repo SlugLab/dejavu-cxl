@@ -61,7 +61,7 @@ public:
         ft::ftNcclInitialize(tensor_para_, pipeline_para_, pipeline_para_, tensor_para_size, pipeline_para_size, 0, 0, 0, 0);
         const int hidden_dim       = _head_num * _head_size;
         const int local_hidden_dim = (_head_num / tensor_para_.world_size_) * _head_size;
-        ft::check_cuda_error(cublasLtCreate(&_cublasltHandle));
+        check_cuda_error(cublasLtCreate(&_cublasltHandle));
         sm_ = ft::getSMVersion();
 #ifdef SPARSITY_ENABLED
         if (sparse) {

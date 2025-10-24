@@ -16,8 +16,7 @@
 
 #pragma once
 #include "src/fastertransformer/utils/Tensor.h"
-#include "torch/csrc/cuda/Stream.h"
-#include "torch/extension.h"
+#include <torch/torch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cstdio>
 #include <cuda_fp16.h>

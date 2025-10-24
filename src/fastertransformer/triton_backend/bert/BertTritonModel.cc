@@ -81,7 +81,7 @@ BertTritonModel<T>::createModelInstance(int                                     
                                         std::pair<std::vector<ft::NcclParam>, std::vector<ft::NcclParam>> nccl_params,
                                         std::shared_ptr<ft::AbstractCustomComm> custom_all_reduce_comm)
 {
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
     const int comms_rank         = device_id % (tensor_para_size_ * pipeline_para_size_);
     const int tensor_para_rank   = rank % tensor_para_size_;
     const int pipeline_para_rank = rank / tensor_para_size_;
@@ -104,7 +104,7 @@ BertTritonModel<T>::createModelInstance(int                                     
         cublas_handle, cublaslt_handle, stream, cublas_algo_map.get(), cublas_wrapper_mutex.get(), allocator.get()));
 
     std::unique_ptr<cudaDeviceProp> cuda_device_prop_ptr(new cudaDeviceProp);
-    ft::check_cuda_error(cudaGetDeviceProperties(cuda_device_prop_ptr.get(), device_id));
+    check_cuda_error(cudaGetDeviceProperties(cuda_device_prop_ptr.get(), device_id));
 
     if (std::is_same<T, half>::value) {
         cublas_wrapper->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
@@ -168,7 +168,7 @@ BertTritonModel<T>::createModelInstance(int                                     
 template<typename T>
 void BertTritonModel<T>::createSharedWeights(int device_id, int rank)
 {
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
     const int tensor_para_rank   = rank % tensor_para_size_;
     const int pipeline_para_rank = rank / tensor_para_size_;
     shared_weights_[device_id]   = std::make_shared<ft::BertWeight<T>>(head_num_ * size_per_head_,

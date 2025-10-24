@@ -42,6 +42,7 @@
 // #include "src/fastertransformer/utils/cache_utils.h"
 
 #include "src/fastertransformer/models/multi_gpu_gpt/ControllerClient.h"
+#include "src/fastertransformer/utils/moe_token_ft_manager.h"
 
 #define CACHE_REPLICA_BASE_PORT 8888
 #define CACHE_REPLICA_BASE_PORT_ON_FAILURE 9999
@@ -150,6 +151,13 @@ private:
 
     std::vector<DejaVuClient*> dejavu_clients_;
     std::vector<int>           current_slot_ids_;
+
+    // MoE Token Stream Fault Tolerance
+    MoETokenFTManager*           moe_token_ft_manager_    = nullptr;
+    TokenStreamRecoveryHelper*   token_recovery_helper_   = nullptr;
+    AdaptiveCheckpointPolicy*    adaptive_checkpoint_     = nullptr;
+    bool                         enable_moe_token_ft_     = false;
+    size_t                       moe_checkpoint_interval_ = 1;
 
     std::mutex controller_mtx_;
     double     ms_heartbeat_ = 1000.0;  // how often to send heartbeats to the controller
@@ -440,6 +448,31 @@ public:
     void unRegisterCallback();
 
     void reset();
+
+    // MoE Token Stream Fault Tolerance Methods
+    void initializeMoETokenFT(bool enable = true, size_t checkpoint_interval = 1);
+    void shutdownMoETokenFT();
+
+    void checkpointMoEToken(int token_id,
+                           int step,
+                           int ubatch_id,
+                           const int* expert_indices,
+                           const float* expert_weights,
+                           const void* expert_activations,
+                           size_t activation_size);
+
+    bool recoverMoEToken(int step,
+                        int ubatch_id,
+                        int token_id,
+                        int* expert_indices,
+                        float* expert_weights,
+                        void* expert_activations);
+
+    void handleMoEFailure(int failed_step, int ubatch_id);
+    void completeMoERecovery();
+
+    bool isMoETokenFTEnabled() const { return enable_moe_token_ft_; }
+    void printMoETokenFTStats() const;
 
     // prompt-token disaggregation
     bool             dv_server_started_ = false;

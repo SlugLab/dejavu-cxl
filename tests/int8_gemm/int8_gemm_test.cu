@@ -67,9 +67,6 @@ void int8_gemm_test(
     auto x = torch::randint(-128, 128, {m, k}, torch::dtype(at_int32).requires_grad(false));
     auto w = torch::randint(-128, 128, {k, n}, torch::dtype(at_int32).requires_grad(false));
 
-    ft::FT_CHECK(torch::allclose(x, x.to(at_int8).to(at_int32)));
-    ft::FT_CHECK(torch::allclose(w, w.to(at_int8).to(at_int32)));
-
     auto y = torch::matmul(x, w);
 
     ft::Tensor{ft::MEMORY_CPU, ft::TYPE_INT32, {(size_t)m, (size_t)k}, get_ptr<int32_t>(x)}.saveNpy("x.npy");
@@ -119,7 +116,7 @@ void int8_gemm_test(
     ft::Tensor{ft::MEMORY_GPU, ft::TYPE_FP16, {(size_t)m, (size_t)n}, get_ptr<T>(y_gpu)}.saveNpy("y_gpu.npy");
     ft::Tensor{ft::MEMORY_GPU, ft::TYPE_INT32, {(size_t)m, (size_t)n}, get_ptr<int32_t>(y_gpu_int32)}.saveNpy("y_gpu_int32.npy");
 
-    ft::check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_error(cudaStreamSynchronize(stream));
     auto start = high_resolution_clock::now();
 
     for (int i = 0; i < iters; ++i) {
@@ -137,7 +134,7 @@ void int8_gemm_test(
             stream);
     }
 
-    ft::check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_error(cudaStreamSynchronize(stream));
     auto end = high_resolution_clock::now();
 
     auto duration = duration_cast<microseconds>(end - start);

@@ -279,7 +279,8 @@ __global__ void cross_attention_kernel_opt(T* __restrict query_buf,
         local_i = max(local_i, logits[i]);
     }
 
-    float max_val = MaxValBlockReduce(max_val_block_temp_storage).Reduce(local_i, cub::Max());
+    auto max_op = [](float a, float b) { return max(a, b); };
+    float max_val = MaxValBlockReduce(max_val_block_temp_storage).Reduce(local_i, max_op);
     if (tid == 0) {
         s_max_val = max_val;
     }

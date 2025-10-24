@@ -1,8 +1,19 @@
+// Ensure GNU/POSIX extensions for Boost.Asio and socket/termios symbols
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include <vector>
 #include <queue>
 #include <mutex>
 #include <sys/ioctl.h>
-#include <boost/asio.hpp>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <linux/if.h>
 #include <arpa/inet.h>
 #include <unistd.h>

@@ -25,6 +25,34 @@ class ParallelGPT(GPT):
             del self.model
             self.build_model = False
 
+        print(f"[DEBUG] ParallelGptOp parameters:")
+        print(f"  expert_num={self.expert_num} (type: {type(self.expert_num)})")
+        print(f"  moe_k={self.moe_k} (type: {type(self.moe_k)})")
+        print(f"  moe_layer_index={self.moe_layer_index} (type: {type(self.moe_layer_index)})")
+        print(f"  inter_size={self.inter_size} (type: {type(self.inter_size)})")
+        print(f"  layernorm_type={self.layernorm_type} (type: {type(self.layernorm_type)})")
+        print(f"  activation_type={self.activation_type} (type: {type(self.activation_type)})")
+
+        # Debug weight tensors
+        print(f"[DEBUG] Weight tensor validation:")
+        print(f"  Total weights: {len(self.weights.w)}")
+        print(f"  int8_weights: {len(self.weights.int8_w)}")
+        print(f"  scales: {len(self.weights.scale)}")
+
+        # Check for any problematic tensors
+        problem_found = False
+        for i, w in enumerate(self.weights.w):
+            if not w.is_cuda or w.dtype not in [torch.float16, torch.float32, torch.bfloat16] or not w.is_contiguous():
+                print(f"    WARNING w[{i}]: shape={w.shape}, dtype={w.dtype}, device={w.device}, is_cuda={w.is_cuda}, is_contiguous={w.is_contiguous()}")
+                problem_found = True
+
+        if not problem_found:
+            print(f"  All {len(self.weights.w)} weights validated: fp16, CUDA, contiguous")
+            # Show first/last few
+            for i in [0, 1, 2, len(self.weights.w)-3, len(self.weights.w)-2, len(self.weights.w)-1]:
+                w = self.weights.w[i]
+                print(f"    w[{i}]: shape={w.shape}, numel={w.numel()}")
+
         self.model = torch.classes.FasterTransformer.ParallelGptOp(
             self.head_num, self.size_per_head, self.inter_size,
             self.layer_num,

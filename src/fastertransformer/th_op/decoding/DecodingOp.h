@@ -68,7 +68,7 @@ public:
         repetition_penalty_(repetition_penalty),
         _weights(w)
     {
-        ft::check_cuda_error(cublasLtCreate(&cublasltHandle_));
+        check_cuda_error(cublasLtCreate(&cublasltHandle_));
         cublas_algo_map_      = new ft::cublasAlgoMap("gemm_config.in");
         cublas_wrapper_mutex_ = new std::mutex();
 
@@ -128,7 +128,7 @@ public:
         decoding_weights.post_decoder_embedding.kernel = get_ptr<T>(_weights[26]);
         decoding_weights.post_decoder_embedding.bias   = get_ptr<T>(_weights[27]);
 
-        ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+        check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
     }
 
     ~FTDecoding() override

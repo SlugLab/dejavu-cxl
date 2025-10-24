@@ -75,7 +75,7 @@ public:
         tensor_para_size_(tensor_para_size),
         pipeline_para_size_(pipeline_para_size)
     {
-        ft::check_cuda_error(cublasLtCreate(&cublasltHandle_));
+        check_cuda_error(cublasLtCreate(&cublasltHandle_));
         cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG, "");
         cublas_wrapper_mutex_ = new std::mutex();
 
@@ -116,7 +116,7 @@ public:
 
         gpt_weights_.setMaxSeqLen(max_seq_len);
 
-        ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+        check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
     }
 
     ~FTGptNeoX() override

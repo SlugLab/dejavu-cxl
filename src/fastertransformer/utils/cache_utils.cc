@@ -648,21 +648,19 @@ void MPIRMACacheManager::fetch(
     CUDACHECK(cudaMemcpyAsync(dst_address, src_address, num_bytes, cudaMemcpyHostToDevice, stream));
 }
 
+#ifdef WITH_BOOST
 void TCPCacheManager::flush(void* src_address, size_t num_bytes, int dst_rank, void* dst_address, cudaStream_t stream)
 {
 
     if (dst_address != NULL) {
-        // printf("AT TCP FLUSH, LOCAL! SRC_ADDRESS IS %p, DST ADDRESS IS %p, SIZE IS %lu\n", src_address, dst_address,
-        // num_bytes);
         CUDACHECK(cudaMemcpyAsync(dst_address, src_address, num_bytes, cudaMemcpyDeviceToHost, stream));
     }
     else {
         ip::tcp::socket*          socket = (*sockets_)[dst_rank];
         boost::system::error_code ec;
 
-        //printf("AT TCP FLUSH! SOCKET ADDR IS %p, dst_rank is %d, send %d bytes\n", socket, dst_rank, num_bytes);
         size_t bytes_written = write(
-            *socket, buffer(src_address, num_bytes), transfer_exactly(num_bytes), ec);  // we need to write num_bytes
+            *socket, buffer(src_address, num_bytes), transfer_exactly(num_bytes), ec);
         if (ec) {
             printf("BOOST ERROR OCCURED WHILE WRITING!\n");
             return;
@@ -674,6 +672,7 @@ void TCPCacheManager::flush(void* src_address, size_t num_bytes, int dst_rank, v
 void TCPCacheManager::fetch(void* dst_address, size_t num_bytes, int src_rank, void* src_address, cudaStream_t stream)
 {
 }
+#endif
 
 void LocalCacheManager::flush(void* src_address, size_t num_bytes, int dst_rank, void* dst_address, cudaStream_t stream)
 {

@@ -134,7 +134,7 @@ public:
             OP_REQUIRES_OK(context, context->GetAttr("output_log_probs", &output_log_probs_));
             OP_REQUIRES_OK(context, context->GetAttr("request_output_length", &request_output_length_));
             cublas_algo_map_ = new ft::cublasAlgoMap("gemm_config.in");
-            ft::check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
+            check_cuda_error(cudaGetDeviceProperties(&prop_, 0));
         }
         catch (std::runtime_error& error) {
             OP_REQUIRES(context, false, tf::errors::Internal(error.what()));

@@ -31,7 +31,11 @@
 #include "src/fastertransformer/utils/cublasMMWrapper.h"
 #include "src/fastertransformer/utils/custom_ar_comm.h"
 
-#include "src/fastertransformer/models/multi_gpu_gpt/StateStreamServer.h"
+// Optional streaming integration depends on DejaVu/StateStream. To allow
+// builds in environments with older protobuf, avoid including the headers
+// here and forward-declare the client type instead. The implementation uses
+// DejaVuClient* only as an opaque handle.
+class DejaVuClient;  // forward declaration
 #include "src/fastertransformer/utils/cache_utils.h"
 
 namespace fastertransformer {

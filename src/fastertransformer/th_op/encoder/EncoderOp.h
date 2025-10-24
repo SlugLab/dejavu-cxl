@@ -57,7 +57,7 @@ public:
         }
 #endif
         int hidden_dim = _head_num * _head_size;
-        ft::check_cuda_error(cublasLtCreate(&_cublasltHandle));
+        check_cuda_error(cublasLtCreate(&_cublasltHandle));
         sm_ = ft::getSMVersion();
 #ifdef SPARSITY_ENABLED
         if (sparse) {

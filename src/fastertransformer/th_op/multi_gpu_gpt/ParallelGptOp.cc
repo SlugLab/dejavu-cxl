@@ -60,6 +60,37 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                              const bool                    is_restart):
     st_(weights[0].scalar_type())
 {
+    // Debug prints to diagnose early constructor failures
+    auto st_to_str = [](at::ScalarType s) {
+        switch (s) {
+            case at::ScalarType::Float: return "float32";
+            case at::ScalarType::Half: return "float16";
+#ifdef ENABLE_BF16
+            case at::ScalarType::BFloat16: return "bfloat16";
+#endif
+            case at::ScalarType::Int: return "int32";
+            case at::ScalarType::Long: return "int64";
+            case at::ScalarType::Bool: return "bool";
+            case at::ScalarType::Byte: return "uint8";
+            case at::ScalarType::Char: return "int8";
+            default: return "unknown";
+        }
+    };
+    printf("[FT][ParallelGptOp] ctor: weights=%zu int8_weights=%zu scales=%zu dtype=%s (%d)\n",
+           weights.size(), int8_weights.size(), scale.size(), st_to_str(st_), (int)st_);
+    if (!weights.empty()) {
+        const int show = std::min<size_t>(6, weights.size());
+        for (int i = 0; i < show; ++i) {
+            const auto& t = weights[i];
+            printf("[FT][ParallelGptOp] w[%d]: device=%s, dtype=%s, is_cuda=%d, is_contig=%d, dims=%ld\n",
+                   i,
+                   t.device().str().c_str(),
+                   st_to_str(t.scalar_type()),
+                   t.is_cuda(),
+                   t.is_contiguous(),
+                   (long)t.dim());
+        }
+    }
 
     for (auto t : weights) {
         CHECK_INPUT(t, st_);
@@ -125,32 +156,7 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                                     torch_rank,
                                     is_restart);
             break;
-#ifdef ENABLE_BF16
-        case at::ScalarType::BFloat16:
-            ftgpt = new FTGpt<__nv_bfloat16>(head_num,
-                                             size_per_head,
-                                             inter_size,
-                                             layer_num,
-                                             expert_num,
-                                             moe_k,
-                                             moe_layer_index,
-                                             vocab_size,
-                                             gpt_variant_params,
-                                             start_id,
-                                             end_id,
-                                             tensor_para_size,
-                                             pipeline_para_size,
-                                             int8_mode,
-                                             weights,
-                                             int8_weights,
-                                             scale,
-                                             shared_contexts_ratio,
-                                             prompt_world_size,
-                                             token_world_size,
-                                             torch_rank,
-                                             is_restart);
-            break;
-#endif
+        // BF16 path disabled in this build due to missing ParallelGpt<bf16> constructor
         default:
             throw std::runtime_error("Wrong Tensor type.");
     }
@@ -271,7 +277,8 @@ std::vector<th::Tensor> ParallelGptOp::forward(th::Tensor               input_id
 
 }  // namespace torch_ext
 
-static auto fasterTransformerGptTHS =
+// Static registration at library load time
+static auto fasterTransformerParallelGptTHS =
 #ifdef LEGACY_THS
     torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformerParallelGptOp")
 #else
@@ -307,10 +314,32 @@ static auto fasterTransformerGptTHS =
                               int64_t,
                               int64_t,
                               bool>())
-        .def("forward", &torch_ext::ParallelGptOp::forward)
+        .def(
+            "forward",
+            static_cast<std::vector<at::Tensor> (torch_ext::ParallelGptOp::*)(
+                at::Tensor,
+                at::Tensor,
+                const int64_t,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<int64_t>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<int64_t>)>(&torch_ext::ParallelGptOp::forward))
         .def("cleanup", &torch_ext::ParallelGptOp::cleanup)
         .def("reset", &torch_ext::ParallelGptOp::reset);
 
 static auto fasterTransformerResetTHS =
-    torch::jit::class_<torch_ext::Reset>("FasterTransformer", "Reset")
-        .def(torch::jit::init<>());
+    torch::jit::class_<torch_ext::Reset>("FasterTransformer", "Reset").def(torch::jit::init<>());

@@ -279,7 +279,12 @@ class GPTWeights:
 
         def load_to_torch(file_path: str, is_load: bool):
             if is_load:
-                return torch.from_numpy(np.fromfile(file_path, dtype=self.weights_data_type)).to(str_type_map[self.inference_data_type])
+                # Check if file exists first (some models like Qwen2 don't have bias terms)
+                if os.path.isfile(file_path):
+                    return torch.from_numpy(np.fromfile(file_path, dtype=self.weights_data_type)).to(str_type_map[self.inference_data_type])
+                else:
+                    # Return empty tensor if file doesn't exist (e.g., RMSNorm has no bias)
+                    return torch.empty(0).to(str_type_map[self.inference_data_type])
             else:
                 return torch.empty(0).to(str_type_map[self.inference_data_type])
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.weight.bin", is_load(i))
@@ -298,26 +303,35 @@ class GPTWeights:
                  is_load(i)) for i in range(self.layer_num)])
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.post_attention_layernorm.bias.bin",
                  is_load(i)) for i in range(self.layer_num)])
-        w.extend([load_to_torch(
-            f"{ckpt_path}/model.layers.{i}.mlp.dense_h_to_4h.weight.{tp_rank}.bin"
-            if os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.dense_h_to_4h.weight.{tp_rank}.bin")
-            else f"{ckpt_path}/model.layers.{i}.mlp.moe.experts.dense_h_to_4h.weight.{tp_rank}.bin",
-            is_load(i)) for i in range(self.layer_num)])
-        w.extend([load_to_torch(
-            f"{ckpt_path}/model.layers.{i}.mlp.dense_h_to_4h.bias.{tp_rank}.bin"
-            if os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.dense_h_to_4h.bias.{tp_rank}.bin")
-            else f"{ckpt_path}/model.layers.{i}.mlp.moe.experts.dense_h_to_4h.bias.{tp_rank}.bin",
-            is_load(i)) for i in range(self.layer_num)])
-        w.extend([load_to_torch(
-            f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.weight.{tp_rank}.bin"
-            if os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.weight.{tp_rank}.bin")
-            else f"{ckpt_path}/model.layers.{i}.mlp.moe.experts.dense_4h_to_h.weight.{tp_rank}.bin",
-            is_load(i)) for i in range(self.layer_num)])
-        w.extend([load_to_torch(
-            f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.bias.bin"
-            if os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.bias.bin")
-            else f"{ckpt_path}/model.layers.{i}.mlp.moe.experts.dense_4h_to_h.bias.bin",
-            is_load(i)) for i in range(self.layer_num)])
+        # FFN/MLP weights - for MoE, expert weights are loaded separately by C++
+        # But we still need valid (non-empty) tensors at these positions
+        if not self.gpt_with_moe:
+            w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.dense_h_to_4h.weight.{tp_rank}.bin",
+                     is_load(i)) for i in range(self.layer_num)])
+            w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.dense_h_to_4h.bias.{tp_rank}.bin",
+                     is_load(i)) for i in range(self.layer_num)])
+            w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.weight.{tp_rank}.bin",
+                     is_load(i)) for i in range(self.layer_num)])
+            w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.bias.bin",
+                     is_load(i)) for i in range(self.layer_num)])
+        else:
+            # For MoE, create valid placeholder tensors (C++ loads actual expert weights from disk)
+            local_inter_size = self.local_inter_size
+            global_hidden_units = self.global_hidden_units
+            dtype = str_type_map[self.inference_data_type]
+
+            # FFN kernel1 placeholders: [global_hidden, local_inter]
+            w.extend([torch.zeros(global_hidden_units, local_inter_size, dtype=dtype) if is_load(i)
+                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
+            # FFN bias1 placeholders: [local_inter]
+            w.extend([torch.zeros(local_inter_size, dtype=dtype) if is_load(i)
+                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
+            # FFN kernel2 placeholders: [local_inter, global_hidden]
+            w.extend([torch.zeros(local_inter_size, global_hidden_units, dtype=dtype) if is_load(i)
+                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
+            # FFN bias2 placeholders: [global_hidden]
+            w.extend([torch.zeros(global_hidden_units, dtype=dtype) if is_load(i)
+                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
 
         if self.has_pre_decoder_layernorm:
             w.append(load_to_torch(f"{ckpt_path}/model.pre_decoder_layernorm.weight.bin", True))
@@ -344,10 +358,13 @@ class GPTWeights:
 
         gate_list = []
         for i in range(self.layer_num):
-            if (os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.moe.gate.wg.weight.bin")):
+            # Try both naming conventions for gating weights
+            if os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.gate.weight.bin"):
+                gate_list.append(load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.gate.weight.bin", True))
+            elif os.path.isfile(f"{ckpt_path}/model.layers.{i}.mlp.moe.gate.wg.weight.bin"):
                 gate_list.append(load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.moe.gate.wg.weight.bin", True))
             else:
-                gate_list.append(load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.moe.gate.wg.weight.bin", False))
+                gate_list.append(torch.empty(0).to(str_type_map[self.inference_data_type]))
         w.extend(gate_list)
 
         if self.has_adapters:
@@ -477,7 +494,7 @@ class GPT(nn.Module):
                  use_attention_linear_bias: bool = False,
                  int8_mode: int = 0,
                  weights_data_type: typing.Union[str, np.dtype] = np.float32,
-                 shared_contexts_ratio: float = 1.0,
+                 shared_contexts_ratio: float = 0.0,
                  prompt_world_size: int = 0,
                  token_world_size: int = 0,
                  torch_rank: int = 0,
@@ -526,6 +543,9 @@ class GPT(nn.Module):
         if (layer_num % pipeline_para_size != 0):
             print(f"[WARNING] LAYER NUM ({layer_num}) IS NOT A MULTIPLE OF PIPELINE_PARA_SIZE ({pipeline_para_size})")
         # assert layer_num % pipeline_para_size == 0, "layer_num must be a multiple of pipeline_para_size."
+
+        # Load the C++ model into Pytorch model.
+        torch.classes.load_library(os.path.abspath(lib_path))
 
         # Prepare weights
         self.weights = GPTWeights(head_num, size_per_head, layer_num, vocab_size,
@@ -649,7 +669,7 @@ class GPT(nn.Module):
 
         if not self.build_model:
             # for the cases we don't load model
-            self.cuda(start_time)
+            self.cuda()
             torch.cuda.empty_cache()  # clean cache for model weight preprocessing
         for t in start_ids:
             input_len = t.size(1)
@@ -684,6 +704,22 @@ class GPT(nn.Module):
             swapping_tensor = None
 
         # outputs: output_ids, output_lengths, output_cum_log_probs (optional)
+        # Convert scalar runtime knobs to tensors to match TorchBind signatures
+        def to_tensor(x, dtype):
+            if x is None or isinstance(x, torch.Tensor):
+                return x
+            return torch.tensor([x], dtype=dtype)
+
+        top_k_t = to_tensor(top_k, torch.int32)
+        top_p_t = to_tensor(top_p, torch.float32)
+        beam_search_diversity_rate_t = to_tensor(beam_search_diversity_rate, torch.float32)
+        temperature_t = to_tensor(temperature, torch.float32)
+        len_penalty_t = to_tensor(len_penalty, torch.float32)
+        repetition_penalty_t = to_tensor(repetition_penalty, torch.float32)
+        presence_penalty_t = to_tensor(presence_penalty, torch.float32)
+        min_length_t = to_tensor(min_length, torch.int32)
+        random_seed_t = to_tensor(random_seed, torch.int64)
+
         outputs = self.model.forward(start_ids,
                                      start_lengths,
                                      max(output_len),
@@ -691,15 +727,15 @@ class GPT(nn.Module):
                                      streaming_tensor,
                                      swapping_tensor,
                                      beam_width,  # optional, can be None
-                                     top_k,  # optional, can be None
-                                     top_p,  # optional, can be None
-                                     beam_search_diversity_rate,  # optional, can be None
-                                     temperature,  # optional, can be None
-                                     len_penalty,  # optional, can be None
-                                     repetition_penalty,  # optional, can be None
-                                     presence_penalty,  # optional, can be None
-                                     min_length,  # optional, can be None
-                                     random_seed,  # optional, can be None
+                                     top_k_t,  # optional, can be None
+                                     top_p_t,  # optional, can be None
+                                     beam_search_diversity_rate_t,  # optional, can be None
+                                     temperature_t,  # optional, can be None
+                                     len_penalty_t,  # optional, can be None
+                                     repetition_penalty_t,  # optional, can be None
+                                     presence_penalty_t,  # optional, can be None
+                                     min_length_t,  # optional, can be None
+                                     random_seed_t,  # optional, can be None
                                      bad_words_list,  # optional, can be None
                                      finished,  # optional, can be None
                                      output_len,

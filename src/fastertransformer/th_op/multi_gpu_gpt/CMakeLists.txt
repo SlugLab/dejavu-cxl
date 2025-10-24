@@ -13,10 +13,12 @@
 # limitations under the License.
 
 FIND_PACKAGE(Protobuf REQUIRED)
-add_library(th_parallel_gpt STATIC
+add_library(th_parallel_gpt OBJECT
     ParallelGptContextDecoderOp.cc ParallelGptDecoderOp.cc ParallelGptOp.cc
     WeightTransposeCalibrateQuantizeOp.cc)
 set_property(TARGET th_parallel_gpt PROPERTY POSITION_INDEPENDENT_CODE  ON)
+# Workaround: avoid instantiating BF16 path in this TORCH op target
+target_compile_options(th_parallel_gpt PRIVATE -UENABLE_BF16)
 
 FIND_PACKAGE(Protobuf REQUIRED)
 add_library(th_dv_controller STATIC ControllerWrapper.cc)

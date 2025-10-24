@@ -478,6 +478,7 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                          const float       f_alpha,
                                          const float       f_beta)
 {
+    (void)A; (void)B; (void)C; (void)transa; (void)transb; (void)m; (void)n; (void)k; (void)lda; (void)ldb; (void)ldc; (void)strideA; (void)strideB; (void)strideC; (void)batch_count; (void)f_alpha; (void)f_beta;
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 

@@ -94,7 +94,7 @@ int main(int argc, char* argv[])
                                                              tensor_para_size,
                                                              data_type);
     size_t total, free;
-    ft::check_cuda_error(cudaMemGetInfo(&free, &total));
+    check_cuda_error(cudaMemGetInfo(&free, &total));
     if (free < buf_size_in_byte + 10 * 1024 * 1024) {
         printf("[ERROR] There is no enough device memory for gemm test!\n"
                " %ld Bytes is needed, but only %ld Bytes is free.\n",
@@ -168,6 +168,6 @@ int main(int argc, char* argv[])
         ft::FT_CHECK(false);
     }
 
-    ft::check_cuda_error(cudaFree(gemm_test_buf));
+    check_cuda_error(cudaFree(gemm_test_buf));
     return 0;
 }

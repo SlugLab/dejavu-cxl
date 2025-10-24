@@ -16,24 +16,32 @@
 
 #pragma once
 
-namespace ft_nvtx {
-static std::string scope;
-std::string        getScope();
-void               addScope(std::string name);
-void               setScope(std::string name);
-void               resetScope();
-static int         domain = 0;
-void               setDeviceDomain(int deviceId);
-int                getDeviceDomain();
-void               resetDeviceDomain();
-bool               isEnableNvtx();
+namespace ft_nvtx
+{
+    static std::string scope;
+    std::string getScope();
+    void addScope(std::string name);
+    void setScope(std::string name);
+    void resetScope();
+    static int domain = 0;
+    void setDeviceDomain(int deviceId);
+    int getDeviceDomain();
+    void resetDeviceDomain();
+    bool isEnableNvtx();
 
-static bool has_read_nvtx_env = false;
-static bool is_enable_ft_nvtx = false;
-void        ftNvtxRangePush(std::string name);
-void        ftNvtxRangePop();
-}  // namespace ft_nvtx
+    static bool has_read_nvtx_env = false;
+    static bool is_enable_ft_nvtx = false;
+    void ftNvtxRangePush(std::string name);
+    void ftNvtxRangePop();
+} // namespace ft_nvtx
 
+// TEMPORARY FIX: Disable PUSH_RANGE and POP_RANGE to avoid segfault issues
+// Using empty compound statements instead of do-while to avoid syntax issues with namespace qualifiers
+#define PUSH_RANGE(name) ((void)0);
+#define POP_RANGE ((void)0);
+
+/*
+// Original definitions - temporarily disabled
 #define PUSH_RANGE(name)                                                                                               \
     {                                                                                                                  \
         if (ft_nvtx::isEnableNvtx()) {                                                                                 \
@@ -47,3 +55,4 @@ void        ftNvtxRangePop();
             ft_nvtx::ftNvtxRangePop();                                                                                 \
         }                                                                                                              \
     }
+*/

@@ -54,7 +54,7 @@ public:
         _mem_hidden_dim(mem_hidden_dim)
     {
         int hidden_dim = _head_num * _head_size;
-        ft::check_cuda_error(cublasLtCreate(&_cublasltHandle));
+        check_cuda_error(cublasLtCreate(&_cublasltHandle));
         cublas_algo_map_ = new ft::cublasAlgoMap("gemm_config.in");
 
         cublas_wrapper_mutex_ = new std::mutex();

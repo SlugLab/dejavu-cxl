@@ -341,7 +341,8 @@ __launch_bounds__(blockSize) __global__ void longformerMHASoftmaxKernel(const T*
             }
         }
 
-        float max_blk = BlockReduce(breduce_temp).Reduce(max_input, cub::Max());
+        auto max_op = [](float a, float b) { return max(a, b); };
+        float max_blk = BlockReduce(breduce_temp).Reduce(max_input, max_op);
         if (tid == 0) {
             max_shared = max_blk;
         }
@@ -361,7 +362,8 @@ __launch_bounds__(blockSize) __global__ void longformerMHASoftmaxKernel(const T*
             }
         }
 
-        float sum_blk = BlockReduce(breduce_temp).Reduce(sum_input, cub::Sum());
+        auto sum_op = [](float a, float b) { return a + b; };
+        float sum_blk = BlockReduce(breduce_temp).Reduce(sum_input, sum_op);
         if (tid == 0) {
             sum_shared = sum_blk;
         }
@@ -405,7 +407,8 @@ __launch_bounds__(blockSize) __global__ void longformerMHASoftmaxKernel(const T*
             }
         }
 
-        float max_blk = BlockReduce(breduce_temp).Reduce(max_input, cub::Max());
+        auto max_op = [](float a, float b) { return max(a, b); };
+        float max_blk = BlockReduce(breduce_temp).Reduce(max_input, max_op);
         if (tid == 0) {
             max_shared = max_blk;
         }
@@ -417,7 +420,9 @@ __launch_bounds__(blockSize) __global__ void longformerMHASoftmaxKernel(const T*
             sum_input += x;
         }
 
-        float sum_blk = BlockReduce(breduce_temp).Reduce(sum_input, cub::Sum());
+        
+        auto sum_op = [](float a, float b) { return a + b; };
+        float sum_blk = BlockReduce(breduce_temp).Reduce(sum_input, sum_op);
         if (tid == 0) {
             sum_shared = sum_blk;
         }

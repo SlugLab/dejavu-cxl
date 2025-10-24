@@ -43,7 +43,7 @@ FasterTransformerLongformerEncoder::FasterTransformerLongformerEncoder(int64_t l
     attn_scaler_(attn_scaler),
     hidden_units_(head_num * size_per_head)
 {
-    ft::check_cuda_error(cublasLtCreate(&_cublasltHandle));
+    check_cuda_error(cublasLtCreate(&_cublasltHandle));
     cublas_algo_map_      = new ft::cublasAlgoMap("gemm_config.in");
     cublas_wrapper_mutex_ = new std::mutex();
 }
@@ -63,7 +63,7 @@ th::Tensor FasterTransformerLongformerEncoder::forward(
     CHECK_INPUT(local_attn_mask, scalar_type);
     CHECK_INPUT(global_attn_mask, scalar_type);
 
-    ft::check_cuda_error(cudaSetDevice(device_id));
+    check_cuda_error(cudaSetDevice(device_id));
 
     int batch_size = input.size(0);
     int seq_len    = input.size(1);
@@ -137,7 +137,7 @@ th::Tensor FasterTransformerLongformerEncoder::forward(
                                                         false);
         setWeight<float>(layer_num_, in_dim_, hidden_units_, intermediate_size_, th_weights, encoder->getWeightsPtr());
         encoder->forward(&output_tensors, &input_tensors);
-        ft::check_cuda_error(cudaStreamSynchronize(stream));
+        check_cuda_error(cudaStreamSynchronize(stream));
         delete encoder;
     }
     else if (scalar_type == at::ScalarType::Half) {
@@ -158,7 +158,7 @@ th::Tensor FasterTransformerLongformerEncoder::forward(
                                                        false);
         setWeight<half>(layer_num_, in_dim_, hidden_units_, intermediate_size_, th_weights, encoder->getWeightsPtr());
         encoder->forward(&output_tensors, &input_tensors);
-        ft::check_cuda_error(cudaStreamSynchronize(stream));
+        check_cuda_error(cudaStreamSynchronize(stream));
         delete encoder;
     }
 #ifdef ENABLE_BF16
@@ -181,7 +181,7 @@ th::Tensor FasterTransformerLongformerEncoder::forward(
         setWeight<__nv_bfloat16>(
             layer_num_, in_dim_, hidden_units_, intermediate_size_, th_weights, encoder->getWeightsPtr());
         encoder->forward(&output_tensors, &input_tensors);
-        ft::check_cuda_error(cudaStreamSynchronize(stream));
+        check_cuda_error(cudaStreamSynchronize(stream));
         delete encoder;
     }
 #endif

@@ -17,19 +17,37 @@
 
 #pragma once
 
+// Ensure GNU/POSIX extensions and required POSIX headers are available
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include <cstddef>
 #include <queue>
 #include <vector>
 
-#include <arpa/inet.h>
 #include <atomic>
-#include <boost/asio.hpp>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <thread>
 
 #include <condition_variable>
 #include <mutex>
+
+// POSIX networking headers used by Boost.Asio
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <termios.h>
+
+#ifdef WITH_BOOST
+#include <boost/asio.hpp>
+#endif
 
 #include "src/fastertransformer/layers/DynamicDecodeLayer.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.h"
@@ -44,7 +62,9 @@ namespace fastertransformer {
 
 static void*                         recv_addr_;
 static bool                          socket_set;
+#ifdef WITH_BOOST
 static boost::asio::ip::tcp::socket* stream_socket_ = NULL;
+#endif
 
 static ncclComm_t*  stream_comm_ = NULL;
 static ncclUniqueId stream_id_;

@@ -20,6 +20,8 @@ namespace ft = fastertransformer;
 
 namespace torch_ext {
 
+// Keep this TU non-op for registrar calls; classes register via static init.
+
 std::vector<size_t> convert_shape(torch::Tensor tensor)
 {
     std::vector<size_t> v_shape;

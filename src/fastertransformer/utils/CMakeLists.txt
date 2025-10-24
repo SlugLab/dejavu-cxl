@@ -74,6 +74,11 @@ if (BUILD_MULTI_GPU)
 	target_link_libraries(cache_utils PUBLIC -lcudart cuda_utils mpi_utils nvtx_utils logger decoding_kernels)
 endif()
 
+add_library(moe_token_ft_manager STATIC moe_token_ft_manager.cc)
+set_property(TARGET moe_token_ft_manager PROPERTY POSITION_INDEPENDENT_CODE  ON)
+set_property(TARGET moe_token_ft_manager PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
+target_link_libraries(moe_token_ft_manager PUBLIC -lcudart cuda_utils logger cache_utils)
+
 add_library(cublasINT8MMWrapper STATIC cublasINT8MMWrapper.cc)
 set_property(TARGET cublasINT8MMWrapper PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET cublasINT8MMWrapper PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)

@@ -45,7 +45,7 @@ FtGptContextDecoder<T>::FtGptContextDecoder(const size_t                  num_he
     int8_scales_(int8_scales),
     remove_padding_(remove_padding)
 {
-    ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
     cublas_wrapper_mutex_ = new std::mutex();
 

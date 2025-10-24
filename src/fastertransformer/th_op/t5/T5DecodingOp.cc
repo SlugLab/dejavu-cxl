@@ -71,7 +71,7 @@ FTT5Decoding<T>::FTT5Decoding(int64_t                        head_num,
     bool use_gated_activation = isGatedActivation(activation_type_);
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, pipeline_para_, tensor_para_size, pipeline_para_size, 0, 0, 0, 0);
 
-    ft::check_cuda_error(cublasLtCreate(&cublasltHandle_));
+    check_cuda_error(cublasLtCreate(&cublasltHandle_));
     cublas_algo_map_      = new ft::cublasAlgoMap("gemm_config.in");
     cublas_wrapper_mutex_ = new std::mutex();
 
@@ -189,8 +189,8 @@ FTT5Decoding<T>::FTT5Decoding(int64_t                        head_num,
         decoding_weights.post_decoder_embedding.bias = get_ptr<T>(_weights[29]);
     }
     int device_id = 0;
-    ft::check_cuda_error(cudaGetDevice(&device_id));
-    ft::check_cuda_error(cudaGetDeviceProperties(&prop_, device_id));
+    check_cuda_error(cudaGetDevice(&device_id));
+    check_cuda_error(cudaGetDeviceProperties(&prop_, device_id));
 }
 
 template<typename T>

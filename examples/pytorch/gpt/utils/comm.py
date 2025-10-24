@@ -77,30 +77,51 @@ def is_model_parallel_initailized():
 
 
 def initialize_model_parallel(world_size: int, rank: int, backend="mpi"):
+    import os
     print(f"Inside _model_para_group, model_para_group is {_model_para_group}")
     assert torch.cuda.is_available()
     assert not is_model_parallel_initailized(), \
         f'parallel group has been already initialized.'
 
+    # Detect MPI environment and override rank/world_size if running under MPI
+    # OpenMPI sets OMPI_COMM_WORLD_RANK and OMPI_COMM_WORLD_SIZE
+    # MPICH sets PMI_RANK and PMI_SIZE
+    if 'OMPI_COMM_WORLD_RANK' in os.environ:
+        rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
+        world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+        print(f'Detected OpenMPI: rank={rank}, world_size={world_size}')
+    elif 'PMI_RANK' in os.environ:
+        rank = int(os.environ['PMI_RANK'])
+        world_size = int(os.environ['PMI_SIZE'])
+        print(f'Detected MPICH: rank={rank}, world_size={world_size}')
+
     print(f'Initializing tensor and pipeline parallel, world size is {world_size}, rank is {rank}')
-    # do we need to pass rank here?
-    # Note: Using NCCL backend since MPI is not available in this PyTorch build
-    # For single GPU or CUDA workloads, NCCL is the recommended backend
-    if backend=="mpi":
-        print("Warning: MPI backend requested but not available. Falling back to NCCL.")
-        dist.init_process_group(
-            backend=dist.Backend.NCCL, 
-            init_method='tcp://localhost:23456',
-            world_size=world_size, 
-            rank=rank
-        )
-    else:
-        dist.init_process_group(
-            backend=dist.Backend.NCCL, 
-            init_method='tcp://localhost:23456',
-            world_size=world_size, 
-            rank=rank
-        )
+
+    # Set CUDA device based on rank before PyTorch distributed initialization
+    # This prevents "Duplicate GPU detected" errors
+    device = rank % torch.cuda.device_count()
+    torch.cuda.set_device(device)
+    print(f'Set CUDA device to {device} for rank {rank}')
+
+    # Set environment variables for PyTorch distributed initialization
+    # This avoids race conditions when using MPI
+    master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
+    os.environ['MASTER_ADDR'] = master_addr
+    # Set PROMPT_MASTER_ADDR and TOKEN_MASTER_ADDR for NCCL initialization
+    os.environ['PROMPT_MASTER_ADDR'] = os.environ.get('PROMPT_MASTER_ADDR', master_addr)
+    os.environ['TOKEN_MASTER_ADDR'] = os.environ.get('TOKEN_MASTER_ADDR', master_addr)
+    # Use a unique port to avoid conflicts (based on user ID + 20000)
+    default_port = str(20000 + (os.getuid() % 10000))
+    os.environ['MASTER_PORT'] = os.environ.get('MASTER_PORT', default_port)
+    os.environ['WORLD_SIZE'] = str(world_size)
+    os.environ['RANK'] = str(rank)
+    print(f'Using MASTER_PORT={os.environ["MASTER_PORT"]}')
+
+    # Use env:// init method which is more reliable with MPI
+    dist.init_process_group(
+        backend=dist.Backend.NCCL,
+        init_method='env://'
+    )
     print("After init!")
 
 def init_group(tensor_para_size: int,

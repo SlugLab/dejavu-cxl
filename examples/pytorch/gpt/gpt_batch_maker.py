@@ -156,6 +156,18 @@ def main():
                         help='Total world size')
     parser.add_argument('--times', type=int, default=5,
                         help='Times to repeat the experiment')
+    parser.add_argument('--inter_size', type=int, default=0,
+                        help='intermediate size for MoE')
+    parser.add_argument('--expert_num', type=int, default=0,
+                        help='number of experts for MoE')
+    parser.add_argument('--moe_k', type=int, default=0,
+                        help='top-k experts for MoE')
+    parser.add_argument('--moe_layer_index', type=str, default='',
+                        help='comma-separated list of MoE layer indices')
+    parser.add_argument('--prompt_world_size', type=int, default=1,
+                        help='world size for prompt processing')
+    parser.add_argument('--token_world_size', type=int, default=1,
+                        help='world size for token processing')
 
     args = parser.parse_args()
 
@@ -200,14 +212,21 @@ def main():
             moe_layer_index = []
         else:
             moe_layer_index = [int(n) for n in moe_layer_index_str[1:-1].replace(' ', '').split(',')]
-        moe_k = 1
+        moe_k = ckpt_config.getint('structure', 'moe_k')
     else:
         gpt_with_moe = False
         expert_num = 0
         moe_layer_index = []
         moe_k = 0
 
-    gpt_with_moe = False
+    # Override with command line arguments if provided
+    if args.expert_num > 0:
+        gpt_with_moe = True
+        expert_num = args.expert_num
+    if args.moe_k > 0:
+        moe_k = args.moe_k
+    if args.moe_layer_index:
+        moe_layer_index = [int(x) for x in args.moe_layer_index.split(',')]
     layer_num = args.layer_num
     output_len = args.output_len
     head_num = args.head_num
@@ -326,6 +345,15 @@ def main():
     def define_model():
 
         startd = time.time()
+
+        # Check config for has_positional_encoding setting
+        has_positional_encoding = True
+        if 'gpt' in ckpt_config.keys() and 'has_positional_encoding' in ckpt_config['gpt']:
+            has_positional_encoding = ckpt_config.getboolean('gpt', 'has_positional_encoding')
+
+        # Qwen2 models use SiLU activation, not GELU
+        activation_type = "Silu" if "qwen" in args.ckpt_path.lower() else "Gelu"
+
         gpt = ParallelGPT(head_num, size_per_head, vocab_size, start_id, end_id,
                           layer_num, args.ckpt_path, max_seq_len, tensor_para_size, pipeline_para_size,
                           lib_path=args.lib_path, inference_data_type=args.inference_data_type,
@@ -334,7 +362,10 @@ def main():
                           gpt_with_moe=gpt_with_moe,
                           expert_num=expert_num,
                           moe_k=moe_k,
-                          moe_layer_index=moe_layer_index, torch_rank=rank)
+                          moe_layer_index=moe_layer_index, torch_rank=rank,
+                          has_positional_encoding=has_positional_encoding,
+                          inter_size=args.inter_size,
+                          activation_type=activation_type)
         print(f"Defining model took {(time.time()-startd)*1000} ms")
 
         startl = time.time()

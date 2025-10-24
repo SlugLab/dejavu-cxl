@@ -612,7 +612,7 @@ class GPT(nn.Module):
 
         if not self.build_model:
             # for the cases we don't load model
-            self.cuda(start_time)
+            self.cuda()
             torch.cuda.empty_cache()  # clean cache for model weight preprocessing
         input_len = start_ids.size(1)
         assert input_len > 0, "input len must be larger than zero. For an unconditional case, use start_id as the first token."
