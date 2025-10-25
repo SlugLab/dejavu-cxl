@@ -1,11 +1,7 @@
-// This TU force-instantiates FasterTransformer's ParallelGptContextDecoder
-// into the th_transformer shared library, ensuring its templated symbols
-// (constructors, forward, dtor) are available to resolve references from
-// ParallelGpt and Torch ops without depending on transformer-shared.
-//
-// Note: We intentionally include the .cc implementation unit here to
-// guarantee the explicit template instantiations are emitted in this
-// shared object. This avoids cross-library device-link issues.
+// Force-instantiate FasterTransformer's ParallelGptContextDecoder templates
+// into the th_transformer shared library, ensuring the required templated
+// constructors and methods are available at runtime to resolve references
+// from Torch ops without depending on transformer-shared.
 
 // Provide a minimal stub for DejaVuClient so the implementation can
 // compile without pulling in protobuf-dependent headers.
@@ -15,3 +11,4 @@ public:
 };
 
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.cc"
+

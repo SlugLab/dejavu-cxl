@@ -16,6 +16,7 @@
 
 #include "cublasMMWrapper.h"
 #include "cuda_utils.h"
+#include <cstdio>
 
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -478,7 +479,26 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                          const float       f_alpha,
                                          const float       f_beta)
 {
-    (void)A; (void)B; (void)C; (void)transa; (void)transb; (void)m; (void)n; (void)k; (void)lda; (void)ldb; (void)ldc; (void)strideA; (void)strideB; (void)strideC; (void)batch_count; (void)f_alpha; (void)f_beta;
+    const char* dbg = std::getenv("FT_DEBUG_GEMM");
+    auto dt_name = [](cudaDataType_t t) {
+        switch (t) {
+            case CUDA_R_16F: return "R16F";
+            case CUDA_R_32F: return "R32F";
+            case CUDA_R_64F: return "R64F";
+            case CUDA_R_16BF: return "R16BF";
+            default: return "UNKNOWN";
+        }
+    };
+    if (dbg && *dbg && std::atoi(dbg) != 0) {
+        fprintf(stderr,
+                "[FT][GEMM] StridedBatchedEx(impl1) transa=%c transb=%c m=%d n=%d k=%d lda=%d ldb=%d ldc=%d strideA=%ld strideB=%ld strideC=%ld batch=%d AType=%s BType=%s CType=%s compute=%s\n",
+                (transa == CUBLAS_OP_N ? 'N' : (transa == CUBLAS_OP_T ? 'T' : 'C')),
+                (transb == CUBLAS_OP_N ? 'N' : (transb == CUBLAS_OP_T ? 'T' : 'C')),
+                m, n, k, lda, ldb, ldc,
+                (long)strideA, (long)strideB, (long)strideC, batch_count,
+                dt_name(Atype_), dt_name(Btype_), dt_name(Ctype_), dt_name(computeType_));
+        fflush(stderr);
+    }
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 
@@ -538,6 +558,26 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                          const int         batch_count,
                                          cudaDataType_t    computeType)
 {
+    const char* dbg = std::getenv("FT_DEBUG_GEMM");
+    auto dt_name = [](cudaDataType_t t) {
+        switch (t) {
+            case CUDA_R_16F: return "R16F";
+            case CUDA_R_32F: return "R32F";
+            case CUDA_R_64F: return "R64F";
+            case CUDA_R_16BF: return "R16BF";
+            default: return "UNKNOWN";
+        }
+    };
+    if (dbg && *dbg && std::atoi(dbg) != 0) {
+        fprintf(stderr,
+                "[FT][GEMM] StridedBatchedEx(impl2) transa=%c transb=%c m=%d n=%d k=%d lda=%d ldb=%d ldc=%d strideA=%ld strideB=%ld strideC=%ld batch=%d AType=%s BType=%s CType=%s compute=%s\n",
+                (transa == CUBLAS_OP_N ? 'N' : (transa == CUBLAS_OP_T ? 'T' : 'C')),
+                (transb == CUBLAS_OP_N ? 'N' : (transb == CUBLAS_OP_T ? 'T' : 'C')),
+                m, n, k, lda, ldb, ldc,
+                (long)strideA, (long)strideB, (long)strideC, batch_count,
+                dt_name(AType), dt_name(BType), dt_name(CType), dt_name(computeType));
+        fflush(stderr);
+    }
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 

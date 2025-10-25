@@ -57,18 +57,17 @@ add_library(th_transformer SHARED
             $<TARGET_OBJECTS:ParallelGptContextDecoder>
             # Ensure cublas host symbols are present in this .so
             $<TARGET_OBJECTS:cublasAlgoMap>
+            $<TARGET_OBJECTS:cublasMMWrapper>
             # Force instantiation of ParallelGptContextDecoder symbols into this .so
             ${CMAKE_CURRENT_LIST_DIR}/force_pgcd_inst.cc
-            # Force-emit cublasMMWrapper into this .so
-            ${CMAKE_CURRENT_LIST_DIR}/force_cublas_wrapper_inst.cc
 )
 target_link_libraries(th_transformer PUBLIC torch
                       -lgrpc
-                      # Link core FT GPT libs explicitly since th_parallel_gpt is an OBJECT library
-                      ParallelGptDecoderLayerWeight
-                      ParallelGptDecoder
-                      ParallelGptContextDecoder
+                      # Link core FT GPT libs explicitly; place providers AFTER consumers for static libs
                       ParallelGpt
+                      ParallelGptContextDecoder
+                      ParallelGptDecoder
+                      ParallelGptDecoderLayerWeight
                       th_bart
                       th_bert
                       th_common
