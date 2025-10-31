@@ -55,7 +55,7 @@ endif()
 target_link_libraries(th_parallel_gpt PRIVATE torch
 	ParallelGptContextDecoder ParallelGptDecoder ParallelGptDVBaseline ParallelGpt ParallelGptDVBenchmark ParallelGptDVFT -lprotobuf -lgrpc -lgrpc++ -lgpr
     calibrate_quantize_weight_kernels nccl_utils th_common th_utils)
-target_include_directories(th_parallel_gpt BEFORE PRIVATE ${Protobuf_INCLUDE_DIRS})
+target_include_directories(th_parallel_gpt BEFORE PRIVATE ${Protobuf_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS})
 
 target_link_libraries(th_dv_controller PRIVATE torch Controller th_common th_utils)
 target_include_directories(th_dv_controller BEFORE PRIVATE ${Protobuf_INCLUDE_DIRS})

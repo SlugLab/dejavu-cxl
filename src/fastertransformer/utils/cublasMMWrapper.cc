@@ -182,7 +182,11 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
 
     int findAlgo = cublas_algo_map_->isExist(batch_count, m, n, k, getCublasDataType(Atype_));
 
-    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype_));
+    // Use the runtime AType passed to this call to look up the algo.
+    // The previous implementation used the wrapper's configured Atype_,
+    // which can differ from AType in mixed-precision paths (e.g., FP16 inputs with FP32 accumulation).
+    // This mismatch can select an incompatible algo and lead to CUBLAS_STATUS_EXECUTION_FAILED.
+    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(AType));
     if (findAlgo) {
         if (info.stages != -1) {
             using_cublasLt = true;
