@@ -135,3 +135,7 @@ add_library(tensor STATIC Tensor.cc)
 set_property(TARGET tensor PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET tensor PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
 target_link_libraries(tensor PUBLIC cuda_utils logger)
+
+add_library(nf4_weight_loader STATIC nf4_weight_loader.cc)
+set_property(TARGET nf4_weight_loader PROPERTY POSITION_INDEPENDENT_CODE  ON)
+target_link_libraries(nf4_weight_loader PUBLIC cuda_utils logger nf4_dequant_kernels)

@@ -138,19 +138,19 @@ def convert_qwen2_moe_to_ft(args):
     # Convert embedding weights
     print("\nConverting embeddings...")
     if 'model.embed_tokens.weight' in hf_weights:
-        embed_weight = hf_weights['model.embed_tokens.weight'].numpy().astype(np_weight_dtype)
+        embed_weight = hf_weights['model.embed_tokens.weight'].float().numpy().astype(np_weight_dtype)
         embed_weight.tofile(saved_dir / "model.wte.bin")
         print(f"  Saved word embeddings: {embed_weight.shape}")
 
     # Convert final layer norm
     if 'model.norm.weight' in hf_weights:
-        ln_weight = hf_weights['model.norm.weight'].numpy().astype(np_weight_dtype)
+        ln_weight = hf_weights['model.norm.weight'].float().numpy().astype(np_weight_dtype)
         ln_weight.tofile(saved_dir / "model.final_layernorm.weight.bin")
         print(f"  Saved final layernorm: {ln_weight.shape}")
 
     # Convert LM head
     if 'lm_head.weight' in hf_weights:
-        lm_head = hf_weights['lm_head.weight'].numpy().astype(np_weight_dtype)
+        lm_head = hf_weights['lm_head.weight'].float().numpy().astype(np_weight_dtype)
         lm_head.tofile(saved_dir / "model.lm_head.weight.bin")
         print(f"  Saved LM head: {lm_head.shape}")
 
@@ -163,7 +163,7 @@ def convert_qwen2_moe_to_ft(args):
 
         # 1. Input LayerNorm
         if f"{prefix}.input_layernorm.weight" in hf_weights:
-            weight = hf_weights[f"{prefix}.input_layernorm.weight"].numpy().astype(np_weight_dtype)
+            weight = hf_weights[f"{prefix}.input_layernorm.weight"].float().numpy().astype(np_weight_dtype)
             weight.tofile(saved_dir / f"model.layers.{layer_idx}.input_layernorm.weight.bin")
 
         # 2. Self-Attention QKV weights (with tensor parallelism)
@@ -184,7 +184,7 @@ def convert_qwen2_moe_to_ft(args):
             for tp_rank in range(tensor_para_size):
                 start_idx = tp_rank * split_size
                 end_idx = (tp_rank + 1) * split_size
-                qkv_split = qkv_combined[start_idx:end_idx, :].numpy().astype(np_weight_dtype)
+                qkv_split = qkv_combined[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
                 qkv_split.tofile(saved_dir / f"model.layers.{layer_idx}.attention.query_key_value.weight.{tp_rank}.bin")
 
             # QKV biases if present
@@ -198,7 +198,7 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    bias_split = qkv_bias_combined[start_idx:end_idx].numpy().astype(np_weight_dtype)
+                    bias_split = qkv_bias_combined[start_idx:end_idx].float().numpy().astype(np_weight_dtype)
                     bias_split.tofile(saved_dir / f"model.layers.{layer_idx}.attention.query_key_value.bias.{tp_rank}.bin")
 
         # 3. Attention output projection (split input dimension)
@@ -210,19 +210,19 @@ def convert_qwen2_moe_to_ft(args):
             for tp_rank in range(tensor_para_size):
                 start_idx = tp_rank * split_size
                 end_idx = (tp_rank + 1) * split_size
-                o_proj_split = o_proj_weight[:, start_idx:end_idx].numpy().astype(np_weight_dtype)
+                o_proj_split = o_proj_weight[:, start_idx:end_idx].float().numpy().astype(np_weight_dtype)
                 o_proj_split.tofile(saved_dir / f"model.layers.{layer_idx}.attention.dense.weight.{tp_rank}.bin")
 
         # 4. Post-attention LayerNorm
         if f"{prefix}.post_attention_layernorm.weight" in hf_weights:
-            weight = hf_weights[f"{prefix}.post_attention_layernorm.weight"].numpy().astype(np_weight_dtype)
+            weight = hf_weights[f"{prefix}.post_attention_layernorm.weight"].float().numpy().astype(np_weight_dtype)
             weight.tofile(saved_dir / f"model.layers.{layer_idx}.post_attention_layernorm.weight.bin")
 
         # 5. MoE expert weights
         if num_experts > 0:
             # Gate (router) weights
             if f"{prefix}.mlp.gate.weight" in hf_weights:
-                gate_weight = hf_weights[f"{prefix}.mlp.gate.weight"].numpy().astype(np_weight_dtype)
+                gate_weight = hf_weights[f"{prefix}.mlp.gate.weight"].float().numpy().astype(np_weight_dtype)
                 gate_weight.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.gate.weight.bin")
 
             # Process each expert
@@ -237,7 +237,7 @@ def convert_qwen2_moe_to_ft(args):
                     for tp_rank in range(tensor_para_size):
                         start_idx = tp_rank * split_size
                         end_idx = (tp_rank + 1) * split_size
-                        weight_split = gate_proj[start_idx:end_idx, :].numpy().astype(np_weight_dtype)
+                        weight_split = gate_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
                         weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight.{tp_rank}.bin")
 
                 # Expert up projection
@@ -247,7 +247,7 @@ def convert_qwen2_moe_to_ft(args):
                     for tp_rank in range(tensor_para_size):
                         start_idx = tp_rank * split_size
                         end_idx = (tp_rank + 1) * split_size
-                        weight_split = up_proj[start_idx:end_idx, :].numpy().astype(np_weight_dtype)
+                        weight_split = up_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
                         weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight.{tp_rank}.bin")
 
                 # Expert down projection
@@ -258,7 +258,7 @@ def convert_qwen2_moe_to_ft(args):
                     for tp_rank in range(tensor_para_size):
                         start_idx = tp_rank * split_size
                         end_idx = (tp_rank + 1) * split_size
-                        weight_split = down_proj[:, start_idx:end_idx].numpy().astype(np_weight_dtype)
+                        weight_split = down_proj[:, start_idx:end_idx].float().numpy().astype(np_weight_dtype)
                         weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight.{tp_rank}.bin")
 
             # Shared expert (if present)
@@ -270,7 +270,7 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    weight_split = gate_proj[start_idx:end_idx, :].numpy().astype(np_weight_dtype)
+                    weight_split = gate_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
                     weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.shared_expert.gate_proj.weight.{tp_rank}.bin")
 
                 # Shared expert up projection
@@ -279,7 +279,7 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    weight_split = up_proj[start_idx:end_idx, :].numpy().astype(np_weight_dtype)
+                    weight_split = up_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
                     weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.shared_expert.up_proj.weight.{tp_rank}.bin")
 
                 # Shared expert down projection
@@ -288,7 +288,7 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    weight_split = down_proj[:, start_idx:end_idx].numpy().astype(np_weight_dtype)
+                    weight_split = down_proj[:, start_idx:end_idx].float().numpy().astype(np_weight_dtype)
                     weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.shared_expert.down_proj.weight.{tp_rank}.bin")
 
     print(f"\n✅ Conversion complete! Weights saved to {saved_dir}")

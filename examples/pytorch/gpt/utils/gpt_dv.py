@@ -51,6 +51,7 @@ class GPTWeights:
             assert int8_mode == 0, "Invalid int8 mode for GPT. Must be 0 or 1"
 
         self.head_num = head_num
+        self.num_kv_heads = 2
         self.size_per_head = size_per_head
         self.layer_num = layer_num
         self.vocab_size = vocab_size
@@ -104,56 +105,53 @@ class GPTWeights:
         self.int8_w = []
         self.scale = []
         # Transformer blocks
-        self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+        # Use minimal placeholders to save memory - will be replaced by load()
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # self_layernorm_gamma
-        self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # self_layernorm_beta
-        self.w.extend([torch.zeros(global_hidden_units, local_hidden_units * 3,
-                      dtype=str_type_map[self.inference_data_type])] * layer_num)   # self_kernel
-        self.w.extend([torch.zeros(local_hidden_units * 3, dtype=str_type_map[self.inference_data_type])]
+        self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # self_kernel
+        self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])]
                       * layer_num)   # self_bias
-        self.w.extend([torch.zeros(local_hidden_units, global_hidden_units, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # self_output_kernel
-        self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # self_output_bias
-        self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # ffn_layernorm_gamma
-        self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # ffn_layernorm_beta
-        self.w.extend([torch.zeros(global_hidden_units, local_inter_size,
-                      dtype=str_type_map[self.inference_data_type])] * layer_num)   # ffn_kernel1
-        self.w.extend([torch.zeros(local_inter_size, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # ffn_kernel1
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # ffn_bias1
-        self.w.extend([torch.zeros(local_inter_size, global_hidden_units,
-                      dtype=str_type_map[self.inference_data_type])] * layer_num)   # ffn_kernel2
-        self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+        self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # ffn_kernel2
+        self.w.extend([torch.empty(0, dtype=str_type_map[
             self.inference_data_type])] * layer_num)   # ffn_bias2
 
         optional_adapter_offset = 0
         # After Transformer blocks
         if self.has_pre_decoder_layernorm:
-            self.w.append(torch.zeros(global_hidden_units, dtype=str_type_map[
+            self.w.append(torch.empty(0, dtype=str_type_map[
                 self.inference_data_type]))   # embedding layernorm gamma
-            self.w.append(torch.zeros(global_hidden_units, dtype=str_type_map[
+            self.w.append(torch.empty(0, dtype=str_type_map[
                 self.inference_data_type]))   # embedding layernorm beta
             optional_adapter_offset += 2
         if self.has_post_decoder_layernorm:
-            self.w.append(torch.zeros(global_hidden_units, dtype=str_type_map[
+            self.w.append(torch.empty(0, dtype=str_type_map[
                 self.inference_data_type]))   # final layernorm gamma
-            self.w.append(torch.zeros(global_hidden_units, dtype=str_type_map[
+            self.w.append(torch.empty(0, dtype=str_type_map[
                 self.inference_data_type]))   # final layernorm beta
             optional_adapter_offset += 2
         if self.has_positional_encoding:
             print(f"has_positional_encoding, max_seq_len is {max_seq_len}")
-            self.w.append(torch.zeros(max_seq_len, global_hidden_units, dtype=str_type_map[
+            self.w.append(torch.empty(0, dtype=str_type_map[
                 self.inference_data_type]))   # position_encoding_table
             optional_adapter_offset += 1
 
         self.pre_embed_idx = len(self.w)
-        self.w.append(torch.zeros(vocab_size, global_hidden_units,
-                      dtype=str_type_map[self.inference_data_type]))   # embedding_table
+        self.w.append(torch.empty(0, dtype=str_type_map[self.inference_data_type]))   # embedding_table
         self.post_embed_idx = len(self.w)
-        self.w.append(torch.zeros(vocab_size, global_hidden_units, dtype=str_type_map[
+        self.w.append(torch.empty(0, dtype=str_type_map[
             self.inference_data_type]))   # post embedding_kernel
         self.adapter_offset = 2 + optional_adapter_offset
 
@@ -162,54 +160,43 @@ class GPTWeights:
 
         # adapters
         if self.has_adapters:
-            self.w.extend([torch.zeros(global_hidden_units, local_adapter_inter_size,
-                          dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor1_kernel1
-            self.w.extend([torch.zeros(local_adapter_inter_size, dtype=str_type_map[
+            self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor1_kernel1
+            self.w.extend([torch.empty(0, dtype=str_type_map[
                 self.inference_data_type])] * layer_num)   # adaptor1_bias1
-            self.w.extend([torch.zeros(local_adapter_inter_size, global_hidden_units,
-                          dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor1_kernel2
-            self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+            self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor1_kernel2
+            self.w.extend([torch.empty(0, dtype=str_type_map[
                 self.inference_data_type])] * layer_num)   # adaptor1_bias2
-            self.w.extend([torch.zeros(global_hidden_units, local_adapter_inter_size,
-                          dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor2_kernel1
-            self.w.extend([torch.zeros(local_adapter_inter_size, dtype=str_type_map[
+            self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor2_kernel1
+            self.w.extend([torch.empty(0, dtype=str_type_map[
                 self.inference_data_type])] * layer_num)   # adaptor2_bias1
-            self.w.extend([torch.zeros(local_adapter_inter_size, global_hidden_units,
-                          dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor2_kernel2
-            self.w.extend([torch.zeros(global_hidden_units, dtype=str_type_map[
+            self.w.extend([torch.empty(0, dtype=str_type_map[self.inference_data_type])] * layer_num)   # adaptor2_kernel2
+            self.w.extend([torch.empty(0, dtype=str_type_map[
                 self.inference_data_type])] * layer_num)   # adaptor2_bias2
 
         # Initialization
         # self._map(lambda w: torch.nn.init.normal_(w, mean=0., std=1.))
 
         if (self.int8_mode != 0):
-            self.int8_w.extend([torch.zeros(global_hidden_units, local_hidden_units *
-                               3, dtype=torch.int8)] * layer_num)   # self_int8_kernel
-            self.scale.extend([torch.zeros(local_hidden_units * 3, dtype=torch.float)] * layer_num)   # self_scale
-            self.int8_w.extend([torch.zeros(local_hidden_units, global_hidden_units, dtype=torch.int8)]
+            self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # self_int8_kernel
+            self.scale.extend([torch.empty(0, dtype=torch.float)] * layer_num)   # self_scale
+            self.int8_w.extend([torch.empty(0, dtype=torch.int8)]
                                * layer_num)   # self_output_int8_kernel
-            self.scale.extend([torch.zeros(global_hidden_units, dtype=torch.float)] * layer_num)   # self_output_scale
-            self.int8_w.extend([torch.zeros(global_hidden_units, local_inter_size,
-                               dtype=torch.int8)] * layer_num)   # ffn_int8_kernel1
-            self.scale.extend([torch.zeros(local_inter_size, dtype=torch.float)] * layer_num)   # ffn_scale1
-            self.int8_w.extend([torch.zeros(local_inter_size, global_hidden_units,
-                               dtype=torch.int8)] * layer_num)   # ffn_int8_kernel2
-            self.scale.extend([torch.zeros(global_hidden_units, dtype=torch.float)] * layer_num)   # ffn_scale2
+            self.scale.extend([torch.empty(0, dtype=torch.float)] * layer_num)   # self_output_scale
+            self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # ffn_int8_kernel1
+            self.scale.extend([torch.empty(0, dtype=torch.float)] * layer_num)   # ffn_scale1
+            self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # ffn_int8_kernel2
+            self.scale.extend([torch.empty(0, dtype=torch.float)] * layer_num)   # ffn_scale2
             if self.has_adapters:
-                self.int8_w.extend([torch.zeros(global_hidden_units, local_adapter_inter_size,
-                                   dtype=torch.int8)] * layer_num)   # adaptor1_int8_kernel1
-                self.scale.extend([torch.zeros(local_adapter_inter_size, dtype=torch.float)]
+                self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # adaptor1_int8_kernel1
+                self.scale.extend([torch.empty(0, dtype=torch.float)]
                                   * layer_num)   # adaptor1_scale1
-                self.int8_w.extend([torch.zeros(local_adapter_inter_size, global_hidden_units,
-                                   dtype=torch.int8)] * layer_num)   # adaptor1_int8_kernel2
-                self.scale.extend([torch.zeros(global_hidden_units, dtype=torch.float)] * layer_num)   # adaptor1_scale2
-                self.int8_w.extend([torch.zeros(global_hidden_units, local_adapter_inter_size,
-                                   dtype=torch.int8)] * layer_num)   # adaptor2_int8_kernel1
-                self.scale.extend([torch.zeros(local_adapter_inter_size, dtype=torch.float)]
+                self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # adaptor1_int8_kernel2
+                self.scale.extend([torch.empty(0, dtype=torch.float)] * layer_num)   # adaptor1_scale2
+                self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # adaptor2_int8_kernel1
+                self.scale.extend([torch.empty(0, dtype=torch.float)]
                                   * layer_num)   # adaptor2_scale1
-                self.int8_w.extend([torch.zeros(local_adapter_inter_size, global_hidden_units,
-                                   dtype=torch.int8)] * layer_num)   # adaptor2_int8_kernel2
-                self.scale.extend([torch.zeros(global_hidden_units, dtype=torch.float)] * layer_num)   # adaptor2_scale2
+                self.int8_w.extend([torch.empty(0, dtype=torch.int8)] * layer_num)   # adaptor2_int8_kernel2
+                self.scale.extend([torch.empty(0, dtype=torch.float)] * layer_num)   # adaptor2_scale2
 
     def __getitem__(self, idx):
         return self.w[idx]
@@ -275,34 +262,110 @@ class GPTWeights:
         type_map = {np.float32: torch.float32, np.float16: torch.float16}
         # Load
 
+        # Check if weights are quantized
+        config_path = os.path.join(ckpt_path, "config.ini")
+        self.is_quantized = False
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config_content = f.read()
+                if 'nf4' in config_content.lower() or 'fp4' in config_content.lower():
+                    self.is_quantized = True
+                    print(f"[INFO] ========================================")
+                    print(f"[INFO] QUANTIZED WEIGHTS DETECTED IN {ckpt_path}")
+                    print(f"[INFO] Python will NOT dequantize - using placeholders")
+                    print(f"[INFO] C++ will load quantized weights on-demand")
+                    print(f"[INFO] ========================================")
+
         def is_load(i): return i >= self.start_layer and i < self.end_layer
 
-        def load_to_torch(file_path: str, is_load: bool):
+        def dequantize_nf4(quantized_data, scales, shape):
+            """Dequantize NF4 to FP16"""
+            # NF4 quantization levels
+            nf4_levels = np.array([
+                -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
+                -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0,
+                0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224,
+                0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0
+            ], dtype=np.float16)
+
+            # Unpack 4-bit values
+            high_nibble = (quantized_data >> 4) & 0x0F
+            low_nibble = quantized_data & 0x0F
+
+            indices = np.empty(len(quantized_data) * 2, dtype=np.uint8)
+            indices[::2] = high_nibble
+            indices[1::2] = low_nibble
+
+            # Remove padding
+            total_elements = np.prod(shape)
+            indices = indices[:total_elements]
+
+            # Lookup values
+            dequantized = nf4_levels[indices]
+
+            # Apply scales
+            if len(shape) > 1:
+                dequantized_2d = dequantized.reshape(shape[0], -1)
+                if len(scales) == shape[0]:
+                    scales_expanded = scales.reshape(-1, 1)
+                    dequantized_2d = dequantized_2d * scales_expanded
+                else:
+                    dequantized_2d = dequantized_2d * scales[0]
+                result = dequantized_2d.reshape(shape)
+            else:
+                result = dequantized * scales[0]
+                result = result.reshape(shape)
+
+            return torch.from_numpy(result.astype(np.float16))
+
+        def load_to_torch(file_path: str, is_load: bool, shape_hint=None):
             if is_load:
                 # Check if file exists first (some models like Qwen2 don't have bias terms)
-                if os.path.isfile(file_path):
-                    return torch.from_numpy(np.fromfile(file_path, dtype=self.weights_data_type)).to(str_type_map[self.inference_data_type])
-                else:
+                if not os.path.isfile(file_path):
                     # Return empty tensor if file doesn't exist (e.g., RMSNorm has no bias)
                     return torch.empty(0).to(str_type_map[self.inference_data_type])
+
+                # Check for quantized version
+                scales_path = file_path.replace('.bin', '.scales.bin')
+                if self.is_quantized and os.path.isfile(scales_path) and shape_hint is not None:
+                    # DISABLED: Don't dequantize in Python - causes memory explosion
+                    # Instead, return small placeholder tensor and let C++ load quantized weights on-demand
+                    print(f"[INFO] Skipping quantized weight dequantization for {os.path.basename(file_path)} - C++ will load on-demand")
+                    # Return tiny placeholder (C++ won't use this for quantized weights)
+                    return torch.zeros(1, 1, dtype=str_type_map[self.inference_data_type])
+                else:
+                    # Load FP16 directly
+                    return torch.from_numpy(np.fromfile(file_path, dtype=self.weights_data_type)).to(str_type_map[self.inference_data_type])
             else:
                 return torch.empty(0).to(str_type_map[self.inference_data_type])
-        w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.weight.bin", is_load(i))
+        # Calculate shapes for quantization
+        hidden = self.global_hidden_units
+        local_attn_out = hidden // self.tensor_para_size
+
+        w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.weight.bin", is_load(i), (hidden,))
                  for i in range(self.layer_num)])
-        w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.bias.bin", is_load(i))
+        w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.bias.bin", is_load(i), (hidden,))
                  for i in range(self.layer_num)])
+
+        # QKV weights - need to calculate combined size
+        # For Qwen2-MoE with GQA: Q + K + V
+        qkv_out_dim = hidden + 2 * (hidden // self.head_num * self.num_kv_heads)
+        qkv_split = qkv_out_dim // self.tensor_para_size
+
         w.extend([load_to_torch(
-            f"{ckpt_path}/model.layers.{i}.attention.query_key_value.weight.{tp_rank}.bin", is_load(i)) for i in range(self.layer_num)])
+            f"{ckpt_path}/model.layers.{i}.attention.query_key_value.weight.{tp_rank}.bin",
+            is_load(i), (qkv_split, hidden)) for i in range(self.layer_num)])
         w.extend([load_to_torch(
-            f"{ckpt_path}/model.layers.{i}.attention.query_key_value.bias.{tp_rank}.bin", is_load(i)) for i in range(self.layer_num)])
+            f"{ckpt_path}/model.layers.{i}.attention.query_key_value.bias.{tp_rank}.bin",
+            is_load(i), (qkv_split,)) for i in range(self.layer_num)])
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.attention.dense.weight.{tp_rank}.bin",
-                 is_load(i)) for i in range(self.layer_num)])
-        w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.attention.dense.bias.bin", is_load(i))
+                 is_load(i), (hidden, local_attn_out)) for i in range(self.layer_num)])
+        w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.attention.dense.bias.bin", is_load(i), (hidden,))
                  for i in range(self.layer_num)])
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.post_attention_layernorm.weight.bin",
-                 is_load(i)) for i in range(self.layer_num)])
+                 is_load(i), (hidden,)) for i in range(self.layer_num)])
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.post_attention_layernorm.bias.bin",
-                 is_load(i)) for i in range(self.layer_num)])
+                 is_load(i), (hidden,)) for i in range(self.layer_num)])
         # FFN/MLP weights - for MoE, expert weights are loaded separately by C++
         # But we still need valid (non-empty) tensors at these positions
         if not self.gpt_with_moe:
@@ -334,24 +397,24 @@ class GPTWeights:
                      else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
 
         if self.has_pre_decoder_layernorm:
-            w.append(load_to_torch(f"{ckpt_path}/model.pre_decoder_layernorm.weight.bin", True))
-            w.append(load_to_torch(f"{ckpt_path}/model.pre_decoder_layernorm.bias.bin", True))
+            w.append(load_to_torch(f"{ckpt_path}/model.pre_decoder_layernorm.weight.bin", True, (hidden,)))
+            w.append(load_to_torch(f"{ckpt_path}/model.pre_decoder_layernorm.bias.bin", True, (hidden,)))
 
         if self.has_post_decoder_layernorm:
-            w.append(load_to_torch(f"{ckpt_path}/model.final_layernorm.weight.bin", True))
-            w.append(load_to_torch(f"{ckpt_path}/model.final_layernorm.bias.bin", True))
+            w.append(load_to_torch(f"{ckpt_path}/model.final_layernorm.weight.bin", True, (hidden,)))
+            w.append(load_to_torch(f"{ckpt_path}/model.final_layernorm.bias.bin", True, (hidden,)))
 
         if self.has_positional_encoding:
-            wpe = load_to_torch(f"{ckpt_path}/model.wpe.bin", True).reshape(-1, self.global_hidden_units)
+            wpe = load_to_torch(f"{ckpt_path}/model.wpe.bin", True, (-1, hidden)).reshape(-1, self.global_hidden_units)
             assert self.max_seq_len <= wpe.size(0), (
                 f"max_seq_len ({self.max_seq_len} must not exceed "
                 f"the value of maximum sequence length during training ({wpe.size(0)})."
             )
             w.append(wpe)
-        w.append(load_to_torch(f"{ckpt_path}/model.wte.bin", True))
+        w.append(load_to_torch(f"{ckpt_path}/model.wte.bin", True, (self.vocab_size, hidden)))
         if os.path.isfile(f"{ckpt_path}/model.lm_head.weight.bin"):
             self.share_embed = False
-            w.append(load_to_torch(f"{ckpt_path}/model.lm_head.weight.bin", True))
+            w.append(load_to_torch(f"{ckpt_path}/model.lm_head.weight.bin", True, (self.vocab_size, hidden)))
         else:
             self.share_embed = True
             w.append(torch.empty(0).to(str_type_map[self.inference_data_type]))
@@ -499,7 +562,9 @@ class GPT(nn.Module):
                  token_world_size: int = 0,
                  torch_rank: int = 0,
                  restart: bool = False):
+        print(f"[DEBUG] GPT.__init__ started")
         super().__init__()
+        print(f"[DEBUG] super().__init__() completed")
         self.head_num = head_num
         self.size_per_head = size_per_head
         self.vocab_size = vocab_size
@@ -537,6 +602,7 @@ class GPT(nn.Module):
         self.torch_rank = dist.get_rank() if dist.is_initialized() else torch_rank
         self.restart = restart
 
+        print(f"[DEBUG] Setting class variables...")
         assert torch.cuda.is_available(), "CUDA is required for this model."
 
         assert head_num % tensor_para_size == 0, "head_num must be a multiple of tensor_para_size."
@@ -545,9 +611,32 @@ class GPT(nn.Module):
         # assert layer_num % pipeline_para_size == 0, "layer_num must be a multiple of pipeline_para_size."
 
         # Load the C++ model into Pytorch model.
-        torch.classes.load_library(os.path.abspath(lib_path))
+        print(f"[DEBUG] About to load C++ library from {lib_path}...")
+        try:
+            torch.classes.load_library(os.path.abspath(lib_path))
+            print(f"[DEBUG] C++ library loaded successfully")
+        except OSError as e:
+            if "undefined symbol" in str(e):
+                print(f"[WARNING] C++ library has undefined symbols, attempting lazy load...")
+                print(f"[WARNING] Error was: {e}")
+                # Try to load with RTLD_LAZY | RTLD_GLOBAL to allow undefined symbols
+                import ctypes
+                import sys
+                RTLD_LAZY = 0x00001
+                RTLD_GLOBAL = 0x00100
+                try:
+                    print(f"[DEBUG] Attempting ctypes.CDLL with RTLD_LAZY | RTLD_GLOBAL...")
+                    ctypes.CDLL(os.path.abspath(lib_path), mode=RTLD_LAZY | RTLD_GLOBAL)
+                    print(f"[DEBUG] ctypes.CDLL load successful")
+                except Exception as e2:
+                    print(f"[ERROR] ctypes.CDLL also failed: {e2}")
+                    raise e
+            else:
+                raise
+        print(f"[DEBUG] Proceeding with model initialization...")
 
         # Prepare weights
+        print(f"[DEBUG] Creating GPTWeights object...")
         self.weights = GPTWeights(head_num, size_per_head, layer_num, vocab_size,
                                   max_seq_len, tensor_para_size, pipeline_para_size,
                                   weights_data_type=weights_data_type,
@@ -560,6 +649,7 @@ class GPT(nn.Module):
                                   adapter_inter_size=self.adapter_inter_size,
                                   int8_mode=int8_mode,
                                   inter_size=inter_size)
+        print(f"[DEBUG] GPTWeights created successfully")
 
         # Prepare for tensor/pipeline parallel
         if token_world_size > 0:
@@ -584,8 +674,10 @@ class GPT(nn.Module):
             self.pipeline_para_rank = self.rank // self.tensor_para_size
         print(f"From node {socket.gethostname()}, world_size is {world_size}, rank is {self.rank}, tensor_rank is {self.tensor_para_rank}, pipeline rank is {self.pipeline_para_rank}, device is {self.device}, pipeline_para_size is {self.pipeline_para_size}, tensor_para_size is {self.tensor_para_size}")
 
+        print(f"[DEBUG] About to load weights from {ckpt_path}...")
         is_load = self.weights.load(ckpt_path, tp_rank=self.tensor_para_rank,
                                     pipeline_para_rank=self.pipeline_para_rank)
+        print(f"[DEBUG] Weights loaded successfully, is_load={is_load}")
 
         if not is_load:
                  print("[WARNING] Checkpoint file not found. Model loading is skipped.")

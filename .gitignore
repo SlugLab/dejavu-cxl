@@ -4,3 +4,8 @@ datasets/*
 __pycache__/
 *.pyc
 build1
+*.sh
+*.md
+build*
+*.txt
+.vscode

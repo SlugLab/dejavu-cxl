@@ -3,12 +3,16 @@
 // constructors and methods are available at runtime to resolve references
 // from Torch ops without depending on transformer-shared.
 
-// Provide a minimal stub for DejaVuClient so the implementation can
-// compile without pulling in protobuf-dependent headers.
-class DejaVuClient {
-public:
-    void MarkComplete(int) {}
-};
+#include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.h"
 
-#include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.cc"
+// Explicit template instantiations for float, half, and bfloat16
+namespace fastertransformer {
+
+template class ParallelGptContextDecoder<float>;
+template class ParallelGptContextDecoder<half>;
+#ifdef ENABLE_BF16
+template class ParallelGptContextDecoder<__nv_bfloat16>;
+#endif
+
+}
 

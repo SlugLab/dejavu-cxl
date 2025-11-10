@@ -16,6 +16,7 @@
  */
 
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoder.h"
+#include "src/fastertransformer/models/multi_gpu_gpt/StateStreamClient.h"
 #include "src/fastertransformer/kernels/bert_preprocess_kernels.h"
 #include "src/fastertransformer/kernels/decoding_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"

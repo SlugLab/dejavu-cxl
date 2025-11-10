@@ -182,11 +182,10 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
 
     int findAlgo = cublas_algo_map_->isExist(batch_count, m, n, k, getCublasDataType(Atype_));
 
-    // Use the runtime AType passed to this call to look up the algo.
-    // The previous implementation used the wrapper's configured Atype_,
-    // which can differ from AType in mixed-precision paths (e.g., FP16 inputs with FP32 accumulation).
-    // This mismatch can select an incompatible algo and lead to CUBLAS_STATUS_EXECUTION_FAILED.
-    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(AType));
+    // Use the wrapper's configured Atype_ for algo lookup.
+    // Note: In mixed-precision paths (e.g., FP16 inputs with FP32 accumulation),
+    // ensure the algo map is populated with the correct data type to avoid CUBLAS_STATUS_EXECUTION_FAILED.
+    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(batch_count, m, n, k, getCublasDataType(Atype_));
     if (findAlgo) {
         if (info.stages != -1) {
             using_cublasLt = true;
@@ -240,6 +239,20 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         cublasLtMatmulAlgo_t algo;
         void*                workSpace     = cublas_workspace_;
         int                  workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
+
+        // Safety check: ensure workspace is valid if non-null
+        if (cublas_workspace_ != NULL) {
+            // Verify workspace pointer is accessible
+            cudaPointerAttributes attrs;
+            cudaError_t err = cudaPointerGetAttributes(&attrs, cublas_workspace_);
+            if (err != cudaSuccess) {
+                FT_LOG_ERROR("Invalid cuBLAS workspace pointer: %s", cudaGetErrorString(err));
+                cudaGetLastError(); // Clear error
+                workSpace = NULL;
+                workspaceSize = 0;
+            }
+        }
+
         if (findAlgo) {
             if (info.workspaceSize > workspaceSize) {
                 findAlgo = 0;
@@ -283,7 +296,16 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
             }
         }
 
-        cublasLtMatmul(cublaslt_handle_,
+        // Validate input parameters before cuBLASLt call
+        FT_LOG_DEBUG("cublasLtMatmul: m=%d n=%d k=%d, workspace=%p size=%d", m, n, k, workSpace, workspaceSize);
+
+        // Check for NULL pointers in critical parameters
+        if (A == NULL || B == NULL || C == NULL) {
+            FT_LOG_ERROR("NULL pointer in GEMM: A=%p B=%p C=%p", A, B, C);
+            throw std::runtime_error("NULL pointer passed to cublasLtMatmul");
+        }
+
+        auto status = cublasLtMatmul(cublaslt_handle_,
                        operationDesc,
                        alpha,
                        A,
@@ -299,6 +321,11 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                        workSpace,
                        workspaceSize,
                        stream_);
+
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            FT_LOG_ERROR("cublasLtMatmul failed with status %d for m=%d n=%d k=%d", status, m, n, k);
+        }
+        check_cuda_error(status);
 
         cublasLtMatmulDescDestroy(operationDesc);
         cublasLtMatrixLayoutDestroy(Adesc);

@@ -3,42 +3,50 @@
 # Load MoE FT configuration
 source ~/.moe_ft_config
 
-# Qwen2-MoE Model Configuration (Actual values from converted model)
-export LAYER_NUM=28
-export HEAD_NUM=12
-export SIZE_PER_HEAD=128       # 1536 hidden / 12 heads
-export INTER_SIZE=8960
+# Reduce memory overhead for MoE Token FT
+export MOE_DEVICE_POOL_SIZE=128  # Reduce from 512MB to 128MB
+export MOE_HOST_BUFFER_SIZE=64   # Reduce from 128MB to 64MB
+
+# PyTorch memory management
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
+export CUDA_MODULE_LOADING=LAZY
+
+# Qwen3-30B-A3B Model Configuration
+export LAYER_NUM=48
+export HEAD_NUM=32
+export SIZE_PER_HEAD=64        # 2048 hidden / 32 heads
+export INTER_SIZE=6144
 export VOCAB_SIZE=151936
-export MAX_SEQ_LEN=131072
+export MAX_SEQ_LEN=2048  # Reduce from 40960 to minimize KV cache memory
 
 # MoE specific
-export EXPERT_NUM=6
-export MOE_K=4
+export EXPERT_NUM=128
+export MOE_K=8
 # All layers are MoE layers
-export MOE_LAYER_INDEX="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27"
+export MOE_LAYER_INDEX="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47"
 
-# Parallelism configuration (2-way tensor parallelism)
-export TENSOR_PARA_SIZE=2
+# Parallelism configuration (1-GPU)
+export TENSOR_PARA_SIZE=1
 export PIPELINE_PARA_SIZE=1
-export PROMPT_WORLD_SIZE=2   # Prompt-phase GPUs
-export TOKEN_WORLD_SIZE=2    # Token-phase GPUs
+export PROMPT_WORLD_SIZE=1   # Prompt-phase GPUs
+export TOKEN_WORLD_SIZE=1    # Token-phase GPUs
 
-# Batch configuration
-export UBATCH_SIZE=4
-export NUM_UBATCHES=8
-export MAX_BATCH_SIZE=32
+# Batch configuration (REDUCED FOR DEBUGGING)
+export UBATCH_SIZE=1
+export NUM_UBATCHES=1
+export MAX_BATCH_SIZE=1
 
 # Generation parameters
-export INPUT_LEN=512
-export OUTPUT_LEN=512
+export INPUT_LEN=32
+export OUTPUT_LEN=32
 export TEMPERATURE=0.7
 export TOP_K=50
 export TOP_P=0.95
 
-# Paths
-export CKPT_PATH="/data/models/qwen235b-moe-ft/2-gpu"
-export VOCAB_FILE="/data/models/qwen235b-moe/vocab.json"
-export MERGES_FILE="/data/models/qwen235b-moe/merges.txt"
+# Paths - Using NF4 quantized model
+export CKPT_PATH="/root/Qwen3-30B-A3B-FT/1-gpu-nf4"
+export VOCAB_FILE="/root/Qwen3-30B-A3B/vocab.json"
+export MERGES_FILE="/root/Qwen3-30B-A3B/merges.txt"
 export LIB_PATH="/root/dejavu1/build/lib/libth_transformer.so"
 
 # NCCL configuration for MIG devices
@@ -58,11 +66,10 @@ export FT_LOG_LEVEL=INFO
 # Run the model
 cd /root/dejavu1/build
 
-# Use GPU device ordinals (MIG instances show as device 0)
-# When MIG is enabled, each MIG instance gets a device ID starting from 0
-export CUDA_VISIBLE_DEVICES="0,1"
+# Use single GPU
+export CUDA_VISIBLE_DEVICES="0"
 echo "Using CUDA devices: ${CUDA_VISIBLE_DEVICES}"
-
+# which python3
 mpirun -n $((TENSOR_PARA_SIZE * PIPELINE_PARA_SIZE)) \
     --allow-run-as-root \
     -x ENABLE_MOE_TOKEN_FT \
@@ -71,7 +78,7 @@ mpirun -n $((TENSOR_PARA_SIZE * PIPELINE_PARA_SIZE)) \
     -x MOE_CHECKPOINT_POLICY \
     --bind-to none \
     -x CUDA_VISIBLE_DEVICES \
-    python3 ../examples/pytorch/gpt/run_qwen235b_moe_ft.py \
+    /opt/miniconda3/bin/python3 ../examples/pytorch/gpt/run_qwen235b_moe_ft.py \
         --layer_num $LAYER_NUM \
         --head_num $HEAD_NUM \
         --size_per_head $SIZE_PER_HEAD \

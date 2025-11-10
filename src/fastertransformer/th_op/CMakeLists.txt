@@ -46,7 +46,6 @@ add_library(th_transformer SHARED
             $<TARGET_OBJECTS:th_encoder>
             $<TARGET_OBJECTS:th_gather_tree>
             $<TARGET_OBJECTS:th_longformer>
-            $<TARGET_OBJECTS:th_parallel_gpt>
             $<TARGET_OBJECTS:th_dv_controller>
             $<TARGET_OBJECTS:th_gptneox>
             $<TARGET_OBJECTS:th_swintransformer>
@@ -55,19 +54,34 @@ add_library(th_transformer SHARED
             $<TARGET_OBJECTS:th_vit>
             # Pull in FT model objects directly to resolve template symbols at link time
             $<TARGET_OBJECTS:ParallelGptContextDecoder>
+            $<TARGET_OBJECTS:ParallelGptDecoder>
+            $<TARGET_OBJECTS:ParallelGptDecoderLayerWeight>
+            $<TARGET_OBJECTS:WindowAttentionINT8>
+            $<TARGET_OBJECTS:WindowAttention>
+            $<TARGET_OBJECTS:SwinBasicLayer>
             # Ensure cublas host symbols are present in this .so
             $<TARGET_OBJECTS:cublasAlgoMap>
             $<TARGET_OBJECTS:cublasMMWrapper>
-            # Force instantiation of ParallelGptContextDecoder symbols into this .so
-            ${CMAKE_CURRENT_LIST_DIR}/force_pgcd_inst.cc
+            # Explicit template instantiations
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoderInst.cc
+            # Include WindowAttentionINT8 instantiation file to ensure template instantiation
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/layers/attention_layers_int8/WindowAttentionINT8Inst.cu
+            # Include ParallelGptOp source directly to ensure torch class registration
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptContextDecoderOp.cc
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptDecoderOp.cc
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/WeightTransposeCalibrateQuantizeOp.cc
 )
 target_link_libraries(th_transformer PUBLIC torch
                       -lgrpc
+                      -lprotobuf
                       # Link core FT GPT libs explicitly; place providers AFTER consumers for static libs
                       ParallelGpt
                       ParallelGptContextDecoder
                       ParallelGptDecoder
                       ParallelGptDecoderLayerWeight
+                      -Wl,--whole-archive WindowAttentionINT8 -Wl,--no-whole-archive
+                      StateStreamClient
                       th_bart
                       th_bert
                       th_common
@@ -83,10 +97,15 @@ target_link_libraries(th_transformer PUBLIC torch
                       th_t5
                       th_utils
                       th_vit
+                      calibrate_quantize_weight_kernels
+                      nccl_utils
 )
 
+# Add include directories for the directly compiled th_op sources
+target_include_directories(th_transformer PRIVATE ${Protobuf_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS})
+
 # Ensure linker does not garbage-collect static initializer sections for registrars
-target_link_options(th_transformer PUBLIC "-Wl,--no-gc-sections" "-Wl,--no-as-needed")
+target_link_options(th_transformer PUBLIC "-Wl,--no-gc-sections" "-Wl,--no-as-needed" "-Wl,--allow-shlib-undefined")
 
 if(ENABLE_FP8)
 add_subdirectory(gpt_fp8)
