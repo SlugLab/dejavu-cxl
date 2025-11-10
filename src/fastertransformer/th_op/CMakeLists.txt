@@ -64,8 +64,8 @@ add_library(th_transformer SHARED
             $<TARGET_OBJECTS:cublasMMWrapper>
             # Explicit template instantiations
             ${CMAKE_SOURCE_DIR}/src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoderInst.cc
-            # Include WindowAttentionINT8 instantiation file to ensure template instantiation
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/layers/attention_layers_int8/WindowAttentionINT8Inst.cu
+            # Stub for WindowAttentionINT8 to resolve linker symbols
+            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/WindowAttentionINT8Stub.cc
             # Include ParallelGptOp source directly to ensure torch class registration
             ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc
             ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptContextDecoderOp.cc

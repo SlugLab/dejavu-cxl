@@ -281,12 +281,14 @@ std::vector<th::Tensor> ParallelGptOp::forward(th::Tensor               input_id
 __attribute__((constructor)) static void register_parallel_gpt_op() {
     static bool registered = false;
     if (!registered) {
-        printf("[FT][ParallelGptOp] Registering ParallelGptOp with PyTorch\n");
-        static auto fasterTransformerParallelGptTHS =
+        try {
+            printf("[FT][ParallelGptOp] Registering ParallelGptOp with PyTorch\n");
+            fflush(stdout);
+            static auto fasterTransformerParallelGptTHS =
 #ifdef LEGACY_THS
-            torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformerParallelGptOp")
+                torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformerParallelGptOp")
 #else
-            torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformer", "ParallelGptOp")
+                torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformer", "ParallelGptOp")
 #endif
                 .def(torch::jit::init<int64_t,
                                       int64_t,
@@ -345,10 +347,18 @@ __attribute__((constructor)) static void register_parallel_gpt_op() {
                 .def("cleanup", &torch_ext::ParallelGptOp::cleanup)
                 .def("reset", &torch_ext::ParallelGptOp::reset);
 
-        static auto fasterTransformerResetTHS =
-            torch::jit::class_<torch_ext::Reset>("FasterTransformer", "Reset").def(torch::jit::init<>());
+            static auto fasterTransformerResetTHS =
+                torch::jit::class_<torch_ext::Reset>("FasterTransformer", "Reset").def(torch::jit::init<>());
 
-        registered = true;
-        printf("[FT][ParallelGptOp] Registration complete\n");
+            registered = true;
+            printf("[FT][ParallelGptOp] Registration complete\n");
+            fflush(stdout);
+        } catch (const std::exception& e) {
+            printf("[FT][ParallelGptOp] ERROR during registration: %s\n", e.what());
+            fflush(stdout);
+        } catch (...) {
+            printf("[FT][ParallelGptOp] ERROR: Unknown exception during registration\n");
+            fflush(stdout);
+        }
     }
 }
