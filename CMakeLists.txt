@@ -14,6 +14,13 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR) # for PyTorch extensions, version should be greater than 3.13
 project(FasterTransformer LANGUAGES CXX CUDA)
 
+# Set C++ standard to fix GCC 13.3 compatibility
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
 set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 
 # Use system Protobuf headers discovered by find_package(Protobuf)
@@ -102,7 +109,7 @@ if(BUILD_MULTI_GPU)
 endif()
 
 set(Torch_USE_STATIC_LIBS OFF)
-list(APPEND CMAKE_PREFIX_PATH /usr/local/lib/python3.12/dist-packages/torch)
+list(APPEND CMAKE_PREFIX_PATH /opt/miniconda3/lib/python3.13/site-packages/torch)
 find_package(Torch REQUIRED)
 
 # Extract PyTorch include directories and mark them as system includes
@@ -346,8 +353,12 @@ if(BUILD_PYT)
 endif()
 
 if (BUILD_MULTI_GPU)
+  # Set MPI paths if not already defined
+  if(NOT MPI_INCLUDE_PATH)
+    set(MPI_INCLUDE_PATH "/usr/lib/x86_64-linux-gnu/openmpi/include")
+  endif()
   list(APPEND COMMON_HEADER_DIRS ${MPI_INCLUDE_PATH})
-  list(APPEND COMMON_LIB_DIRS  /home/fot/opt/openmpi/lib)
+  list(APPEND COMMON_LIB_DIRS /usr/lib/x86_64-linux-gnu/openmpi/lib)
 endif()
 
 if(USE_TRITONSERVER_DATATYPE)
@@ -408,17 +419,12 @@ add_library(transformer-shared SHARED
   $<TARGET_OBJECTS:GptNeoXWeight>
   $<TARGET_OBJECTS:LinearAdapterLayer>
   $<TARGET_OBJECTS:OnlineBeamSearchLayer>
-  $<TARGET_OBJECTS:StateStreamServer>
-  $<TARGET_OBJECTS:StateStreamClient>
   $<TARGET_OBJECTS:ParallelGpt>
   $<TARGET_OBJECTS:ParallelGptContextDecoder>
   $<TARGET_OBJECTS:ParallelGptDecoder>
   $<TARGET_OBJECTS:ParallelGptDecoderLayerWeight>
   $<TARGET_OBJECTS:ParallelGptTritonBackend>
   $<TARGET_OBJECTS:ParallelGptWeight>
-  $<TARGET_OBJECTS:ParallelGptDVBaseline>
-  $<TARGET_OBJECTS:ParallelGptDVBenchmark>
-  $<TARGET_OBJECTS:ParallelGptDVFT>
   $<TARGET_OBJECTS:T5Common>
   $<TARGET_OBJECTS:T5Decoder>
   $<TARGET_OBJECTS:T5Decoding>

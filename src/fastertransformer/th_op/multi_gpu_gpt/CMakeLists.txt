@@ -20,9 +20,9 @@ set_property(TARGET th_parallel_gpt PROPERTY POSITION_INDEPENDENT_CODE  ON)
 # Workaround: avoid instantiating BF16 path in this TORCH op target
 target_compile_options(th_parallel_gpt PRIVATE -UENABLE_BF16)
 
-FIND_PACKAGE(Protobuf REQUIRED)
-add_library(th_dv_controller STATIC ControllerWrapper.cc)
-set_property(TARGET th_dv_controller PROPERTY POSITION_INDEPENDENT_CODE  ON)
+# FIND_PACKAGE(Protobuf REQUIRED)
+# add_library(th_dv_controller STATIC ControllerWrapper.cc)
+# set_property(TARGET th_dv_controller PROPERTY POSITION_INDEPENDENT_CODE  ON)
 
 if(BUILD_NCCL_SEND)
 	add_definitions(-DNCCL_SEND=1)
@@ -53,9 +53,9 @@ if(BUILD_STREAM_FILE)
 endif()
 
 target_link_libraries(th_parallel_gpt PRIVATE torch
-	ParallelGptContextDecoder ParallelGptDecoder ParallelGptDVBaseline ParallelGpt ParallelGptDVBenchmark ParallelGptDVFT -lprotobuf -lgrpc -lgrpc++ -lgpr
+	ParallelGptContextDecoder ParallelGptDecoder ParallelGpt
     calibrate_quantize_weight_kernels nccl_utils th_common th_utils)
 target_include_directories(th_parallel_gpt BEFORE PRIVATE ${Protobuf_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS})
 
-target_link_libraries(th_dv_controller PRIVATE torch Controller th_common th_utils)
-target_include_directories(th_dv_controller BEFORE PRIVATE ${Protobuf_INCLUDE_DIRS})
+# target_link_libraries(th_dv_controller PRIVATE torch Controller th_common th_utils)
+# target_include_directories(th_dv_controller BEFORE PRIVATE ${Protobuf_INCLUDE_DIRS})

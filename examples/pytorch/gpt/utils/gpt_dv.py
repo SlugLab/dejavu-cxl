@@ -272,8 +272,7 @@ class GPTWeights:
                     self.is_quantized = True
                     print(f"[INFO] ========================================")
                     print(f"[INFO] QUANTIZED WEIGHTS DETECTED IN {ckpt_path}")
-                    print(f"[INFO] Python will NOT dequantize - using placeholders")
-                    print(f"[INFO] C++ will load quantized weights on-demand")
+                    print(f"[INFO] Python will dequantize NF4 weights to FP16")
                     print(f"[INFO] ========================================")
 
         def is_load(i): return i >= self.start_layer and i < self.end_layer
@@ -327,14 +326,17 @@ class GPTWeights:
 
                 # Check for quantized version
                 scales_path = file_path.replace('.bin', '.scales.bin')
-                if self.is_quantized and os.path.isfile(scales_path) and shape_hint is not None:
-                    # DISABLED: Don't dequantize in Python - causes memory explosion
-                    # Instead, return small placeholder tensor and let C++ load quantized weights on-demand
-                    print(f"[INFO] Skipping quantized weight dequantization for {os.path.basename(file_path)} - C++ will load on-demand")
-                    # Return tiny placeholder (C++ won't use this for quantized weights)
-                    return torch.zeros(1, 1, dtype=str_type_map[self.inference_data_type])
+                has_scales = os.path.isfile(scales_path)
+                if self.is_quantized and has_scales and shape_hint is not None:
+                    # Dequantize NF4 weights to FP16 in Python
+                    quantized_data = np.fromfile(file_path, dtype=np.uint8)
+                    scales = np.fromfile(scales_path, dtype=np.float16)
+                    print(f"[DEQUANT] {os.path.basename(file_path)}: shape={shape_hint}, quantized_size={len(quantized_data)}, scales_size={len(scales)}")
+                    tensor = dequantize_nf4(quantized_data, scales, shape_hint)
+                    print(f"[DEQUANT] Result shape: {tensor.shape}")
+                    return tensor.to(str_type_map[self.inference_data_type])
                 else:
-                    # Load FP16 directly
+                    # Load FP16 directly (no quantization or no scales file)
                     return torch.from_numpy(np.fromfile(file_path, dtype=self.weights_data_type)).to(str_type_map[self.inference_data_type])
             else:
                 return torch.empty(0).to(str_type_map[self.inference_data_type])

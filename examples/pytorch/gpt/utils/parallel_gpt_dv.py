@@ -48,10 +48,11 @@ class ParallelGPT(GPT):
 
         if not problem_found:
             print(f"  All {len(self.weights.w)} weights validated: fp16, CUDA, contiguous")
-            # Show first/last few
-            for i in [0, 1, 2, len(self.weights.w)-3, len(self.weights.w)-2, len(self.weights.w)-1]:
-                w = self.weights.w[i]
-                print(f"    w[{i}]: shape={w.shape}, numel={w.numel()}")
+            # Show first/last few and some middle weights (QKV should be around index 96)
+            for i in [0, 1, 2, 96, 97, 98, 144, 192, len(self.weights.w)-3, len(self.weights.w)-2, len(self.weights.w)-1]:
+                if i < len(self.weights.w):
+                    w = self.weights.w[i]
+                    print(f"    w[{i}]: shape={w.shape}, numel={w.numel()}")
 
         self.model = torch.classes.FasterTransformer.ParallelGptOp(
             self.head_num, self.size_per_head, self.inter_size,

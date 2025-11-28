@@ -13,4 +13,4 @@
 # limitations under the License.
 
 add_library(tf_gpt SHARED GptOp.cc)
-target_link_libraries(tf_gpt PRIVATE ${tf_link} -lcublas -lcublasLt -lcudart ParallelGptDVBaseline)
+target_link_libraries(tf_gpt PRIVATE ${tf_link} -lcublas -lcublasLt -lcudart ParallelGpt)

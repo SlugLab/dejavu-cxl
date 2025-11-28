@@ -22,83 +22,36 @@ set_property(TARGET th_utils PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET th_utils PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
 target_link_libraries(th_utils PUBLIC torch -lcublas -lcudart -lcurand tensor)
 
+# GPT-only build - excludes protobuf/gRPC dependent components
 add_subdirectory(common)
-add_subdirectory(decoder)
-add_subdirectory(decoding)
-add_subdirectory(encoder)
-add_subdirectory(longformer)
-add_subdirectory(swin)
-add_subdirectory(vit)
 add_subdirectory(multi_gpu_gpt)
-add_subdirectory(gptneox)
-add_subdirectory(t5)
-add_subdirectory(bart)
-add_subdirectory(bert)
-add_subdirectory(deberta)
 
 add_library(th_transformer SHARED
-            $<TARGET_OBJECTS:th_bart>
-            $<TARGET_OBJECTS:th_bert>
             $<TARGET_OBJECTS:th_common>
-            $<TARGET_OBJECTS:th_deberta>
-            $<TARGET_OBJECTS:th_decoder>
-            $<TARGET_OBJECTS:th_decoding>
-            $<TARGET_OBJECTS:th_encoder>
-            $<TARGET_OBJECTS:th_gather_tree>
-            $<TARGET_OBJECTS:th_longformer>
-            $<TARGET_OBJECTS:th_dv_controller>
-            $<TARGET_OBJECTS:th_gptneox>
-            $<TARGET_OBJECTS:th_swintransformer>
-            $<TARGET_OBJECTS:th_t5>
+            $<TARGET_OBJECTS:th_parallel_gpt>
             $<TARGET_OBJECTS:th_utils>
-            $<TARGET_OBJECTS:th_vit>
             # Pull in FT model objects directly to resolve template symbols at link time
             $<TARGET_OBJECTS:ParallelGptContextDecoder>
             $<TARGET_OBJECTS:ParallelGptDecoder>
             $<TARGET_OBJECTS:ParallelGptDecoderLayerWeight>
-            $<TARGET_OBJECTS:WindowAttentionINT8>
-            $<TARGET_OBJECTS:WindowAttention>
-            $<TARGET_OBJECTS:SwinBasicLayer>
             # Ensure cublas host symbols are present in this .so
             $<TARGET_OBJECTS:cublasAlgoMap>
             $<TARGET_OBJECTS:cublasMMWrapper>
-            # Explicit template instantiations
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/models/multi_gpu_gpt/ParallelGptContextDecoderInst.cc
-            # Stub for WindowAttentionINT8 to resolve linker symbols
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/WindowAttentionINT8Stub.cc
-            # Include ParallelGptOp source directly to ensure torch class registration
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptContextDecoderOp.cc
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptDecoderOp.cc
-            ${CMAKE_SOURCE_DIR}/src/fastertransformer/th_op/multi_gpu_gpt/WeightTransposeCalibrateQuantizeOp.cc
 )
 target_link_libraries(th_transformer PUBLIC torch
-                      -lgrpc
-                      -lprotobuf
-                      # Link core FT GPT libs explicitly; place providers AFTER consumers for static libs
+                      # Link core FT GPT libs explicitly
                       ParallelGpt
                       ParallelGptContextDecoder
                       ParallelGptDecoder
                       ParallelGptDecoderLayerWeight
-                      -Wl,--whole-archive WindowAttentionINT8 -Wl,--no-whole-archive
-                      StateStreamClient
-                      th_bart
-                      th_bert
+                      TensorParallelGptContextAttentionLayer
+                      TensorParallelDecoderSelfAttentionLayer
+                      -Wl,--whole-archive th_parallel_gpt -Wl,--no-whole-archive
                       th_common
-                      th_deberta
-                      th_decoder
-                      th_decoding
-                      th_encoder
-                      th_gather_tree
-                      th_longformer
-                      th_dv_controller
-                      th_gptneox
-                      th_swintransformer
-                      th_t5
                       th_utils
-                      th_vit
                       calibrate_quantize_weight_kernels
                       nccl_utils
+                      -lmpi_cxx
 )
 
 # Add include directories for the directly compiled th_op sources

@@ -277,88 +277,69 @@ std::vector<th::Tensor> ParallelGptOp::forward(th::Tensor               input_id
 
 }  // namespace torch_ext
 
-// Registration function to be called explicitly
-__attribute__((constructor)) static void register_parallel_gpt_op() {
-    static bool registered = false;
-    if (!registered) {
-        try {
-            printf("[FT][ParallelGptOp] Registering ParallelGptOp with PyTorch\n");
-            fflush(stdout);
-            static auto fasterTransformerParallelGptTHS =
+// Static registration - will be executed when the library is loaded
+static auto fasterTransformerParallelGptTHS =
 #ifdef LEGACY_THS
-                torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformerParallelGptOp")
+    torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformerParallelGptOp")
 #else
-                torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformer", "ParallelGptOp")
+    torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformer", "ParallelGptOp")
 #endif
-                .def(torch::jit::init<int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      std::vector<int64_t>,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      double,
-                                      std::string,
-                                      std::string,
-                                      bool,
-                                      bool,
-                                      bool,
-                                      bool,
-                                      int64_t,
-                                      bool,
-                                      std::vector<th::Tensor>,
-                                      std::vector<th::Tensor>,
-                                      std::vector<th::Tensor>,
-                                      double,
-                                      int64_t,
-                                      int64_t,
-                                      int64_t,
-                                      bool>())
-                .def(
-                    "forward",
-                    static_cast<std::vector<at::Tensor> (torch_ext::ParallelGptOp::*)(
-                        at::Tensor,
-                        at::Tensor,
-                        const int64_t,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<int64_t>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<at::Tensor>,
-                        c10::optional<int64_t>)>(&torch_ext::ParallelGptOp::forward))
-                .def("cleanup", &torch_ext::ParallelGptOp::cleanup)
-                .def("reset", &torch_ext::ParallelGptOp::reset);
+        .def(torch::jit::init<int64_t,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              std::vector<int64_t>,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              double,
+                              std::string,
+                              std::string,
+                              bool,
+                              bool,
+                              bool,
+                              bool,
+                              int64_t,
+                              bool,
+                              std::vector<th::Tensor>,
+                              std::vector<th::Tensor>,
+                              std::vector<th::Tensor>,
+                              double,
+                              int64_t,
+                              int64_t,
+                              int64_t,
+                              bool>())
+        .def(
+            "forward",
+            static_cast<std::vector<at::Tensor> (torch_ext::ParallelGptOp::*)(
+                at::Tensor,
+                at::Tensor,
+                const int64_t,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<int64_t>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<at::Tensor>,
+                c10::optional<int64_t>)>(&torch_ext::ParallelGptOp::forward))
+        .def("cleanup", &torch_ext::ParallelGptOp::cleanup)
+        .def("reset", &torch_ext::ParallelGptOp::reset);
 
-            static auto fasterTransformerResetTHS =
-                torch::jit::class_<torch_ext::Reset>("FasterTransformer", "Reset").def(torch::jit::init<>());
-
-            registered = true;
-            printf("[FT][ParallelGptOp] Registration complete\n");
-            fflush(stdout);
-        } catch (const std::exception& e) {
-            printf("[FT][ParallelGptOp] ERROR during registration: %s\n", e.what());
-            fflush(stdout);
-        } catch (...) {
-            printf("[FT][ParallelGptOp] ERROR: Unknown exception during registration\n");
-            fflush(stdout);
-        }
-    }
-}
+static auto fasterTransformerResetTHS =
+    torch::jit::class_<torch_ext::Reset>("FasterTransformer", "Reset").def(torch::jit::init<>());

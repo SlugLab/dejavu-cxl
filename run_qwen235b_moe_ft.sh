@@ -63,13 +63,20 @@ export CUDA_LAUNCH_BLOCKING=1
 # FasterTransformer logging
 export FT_LOG_LEVEL=INFO
 
+# Library paths - Add cuDNN and other dependencies
+export LD_LIBRARY_PATH="/opt/spack/opt/spack/linux-sapphirerapids/cudnn-9.8.0.87-12-olz7aszw2apm7buppaen2uxq5qpbvxzh/lib:${LD_LIBRARY_PATH}"
+
+# Fix ABI compatibility issues by preloading system libraries
+# Preload system C++ runtime, protobuf, and MPI C++ bindings to match what the library was built with
+export LD_PRELOAD="/lib/x86_64-linux-gnu/libgcc_s.so.1:/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libm.so.6:/lib/x86_64-linux-gnu/libprotobuf.so.32:/lib/x86_64-linux-gnu/libmpi_cxx.so.40:${LD_PRELOAD}"
+
 # Run the model
 cd /root/dejavu1/build
 
 # Use single GPU
 export CUDA_VISIBLE_DEVICES="0"
 echo "Using CUDA devices: ${CUDA_VISIBLE_DEVICES}"
-# which python3
+# which pytho
 mpirun -n $((TENSOR_PARA_SIZE * PIPELINE_PARA_SIZE)) \
     --allow-run-as-root \
     -x ENABLE_MOE_TOKEN_FT \
@@ -78,7 +85,9 @@ mpirun -n $((TENSOR_PARA_SIZE * PIPELINE_PARA_SIZE)) \
     -x MOE_CHECKPOINT_POLICY \
     --bind-to none \
     -x CUDA_VISIBLE_DEVICES \
-    /opt/miniconda3/bin/python3 ../examples/pytorch/gpt/run_qwen235b_moe_ft.py \
+    -x LD_LIBRARY_PATH \
+    -x LD_PRELOAD \
+    /opt/miniconda3/bin/python3.13 ../examples/pytorch/gpt/run_qwen235b_moe_ft.py \
         --layer_num $LAYER_NUM \
         --head_num $HEAD_NUM \
         --size_per_head $SIZE_PER_HEAD \
