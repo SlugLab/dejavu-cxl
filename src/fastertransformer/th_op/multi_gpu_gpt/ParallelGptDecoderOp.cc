@@ -43,6 +43,11 @@ FtGptDecoder<T>::FtGptDecoder(const size_t                  num_heads,
     int8_weights_(int8_weights),
     int8_scales_(int8_scales)
 {
+    // Create our own cuBLAS handle instead of using PyTorch's
+    // This avoids potential configuration conflicts
+    check_cuda_error(cublasCreate(&cublas_handle_));
+    // Set math mode for Hopper/H100 GPUs - use default to ensure compatibility
+    check_cuda_error(cublasSetMathMode(cublas_handle_, CUBLAS_DEFAULT_MATH));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
     cublas_wrapper_mutex_ = new std::mutex();
@@ -144,6 +149,7 @@ FtGptDecoder<T>::~FtGptDecoder()
 {
     ft::ftNcclParamDestroy(tensor_para_);
     ft::ftNcclParamDestroy(pipeline_para_);
+    cublasDestroy(cublas_handle_);
     cublasLtDestroy(cublaslt_handle_);
     delete cublas_algo_map_;
     delete cublas_wrapper_mutex_;
@@ -177,15 +183,15 @@ void FtGptDecoder<T>::forward(const int64_t            max_input_length,
     //     cache_indirection [local_batch_size, beam_width, memory_length], int, optional.
     //     linear_bias_slopes_opt: [num_heads], optional
 
-    auto stream        = at::cuda::getCurrentCUDAStream().stream();
-    auto cublas_handle = at::cuda::getCurrentCUDABlasHandle();
-    cublasSetStream(cublas_handle, stream);
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    // Use our own cuBLAS handle instead of PyTorch's
+    cublasSetStream(cublas_handle_, stream);
 
     ft::Allocator<ft::AllocatorType::TH> allocator;
     allocator.setStream(stream);
 
     ft::cublasMMWrapper cublas_wrapper(
-        cublas_handle, cublaslt_handle_, stream, cublas_algo_map_, cublas_wrapper_mutex_, &allocator);
+        cublas_handle_, cublaslt_handle_, stream, cublas_algo_map_, cublas_wrapper_mutex_, &allocator);
 
     if (std::is_same<T, half>::value) {
         cublas_wrapper.setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);

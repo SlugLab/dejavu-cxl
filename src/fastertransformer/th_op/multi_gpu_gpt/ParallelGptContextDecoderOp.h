@@ -86,6 +86,7 @@ private:
     ft::NcclParam tensor_para_;
     ft::NcclParam pipeline_para_;
 
+    cublasHandle_t        cublas_handle_;
     cublasLtHandle_t      cublaslt_handle_;
     std::mutex*           cublas_wrapper_mutex_;
     ft::cublasAlgoMap*    cublas_algo_map_;

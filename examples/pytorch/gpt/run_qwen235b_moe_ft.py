@@ -201,6 +201,10 @@ def main():
                        choices=['fp32', 'fp16', 'bf16'],
                        default='fp16',
                        help='Inference data type')
+    parser.add_argument('--weights_data_type', type=str,
+                       choices=['fp32', 'fp16'],
+                       default='fp16',
+                       help='Weights data type (fp16 for NF4 quantized models)')
     parser.add_argument('--start_id', type=int, default=151643,
                        help='Start token ID for Qwen')
     parser.add_argument('--end_id', type=int, default=151643,
@@ -259,6 +263,7 @@ def main():
         pipeline_para_size=args.pipeline_para_size,
         lib_path=args.lib_path,
         inference_data_type=args.inference_data_type,
+        weights_data_type=args.weights_data_type,
         inter_size=args.inter_size,
         expert_num=args.expert_num,
         moe_k=args.moe_k,

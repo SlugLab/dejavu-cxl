@@ -665,9 +665,23 @@ void ParallelGptContextDecoder<T>::forward(
 
         auto startl = std::chrono::high_resolution_clock::now();
 
+        // Debug: print moe_layer_index_ size once at start
+        if (ite == 0) {
+            fprintf(stderr, "[FT][ContextDecoder] moe_layer_index_.size()=%zu expert_num_=%zu moe_k_=%zu\n",
+                    moe_layer_index_.size(), expert_num_, moe_k_);
+            fflush(stderr);
+        }
+
         for (uint l = 0; l < num_layer_; l++) {
             PUSH_RANGE(fmtstr("layer_%u", l));
             bool use_moe = std::find(moe_layer_index_.begin(), moe_layer_index_.end(), l) != moe_layer_index_.end();
+
+            // Debug: print use_moe for first layer
+            if (l == 0 && ite == 0) {
+                fprintf(stderr, "[FT][ContextDecoder] Layer 0: use_moe=%d\n", use_moe);
+                fflush(stderr);
+            }
+
             if (isValidLayerParallelId(l) == false) {
                 continue;
             }

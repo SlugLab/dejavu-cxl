@@ -57,17 +57,23 @@ export NCCL_SHM_DISABLE=0
 export NCCL_NET_GDR_LEVEL=0
 export NCCL_SOCKET_IFNAME=lo
 
-# CUDA debugging
-export CUDA_LAUNCH_BLOCKING=1
+# CUDA debugging (disabled to avoid sync issues)
+# export CUDA_LAUNCH_BLOCKING=1
 
 # FasterTransformer logging
 export FT_LOG_LEVEL=INFO
+
+# Use FP16 accumulation for attention QK to avoid mixed-precision GEMM issues
+# This avoids the problematic cublasGemmStridedBatchedEx with FP16 in, FP32 out
+export CONTEXT_ATTENTION_BMM1_HALF_ACCUM=ON
 
 # Library paths - Add cuDNN and other dependencies
 export LD_LIBRARY_PATH="/opt/spack/opt/spack/linux-sapphirerapids/cudnn-9.8.0.87-12-olz7aszw2apm7buppaen2uxq5qpbvxzh/lib:${LD_LIBRARY_PATH}"
 
 # Fix ABI compatibility issues by preloading system libraries
-# Preload system C++ runtime, protobuf, and MPI C++ bindings to match what the library was built with
+# Use LD_LIBRARY_PATH to prefer system cuBLAS
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+# Preload other system libraries for ABI compatibility
 export LD_PRELOAD="/lib/x86_64-linux-gnu/libgcc_s.so.1:/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libm.so.6:/lib/x86_64-linux-gnu/libprotobuf.so.32:/lib/x86_64-linux-gnu/libmpi_cxx.so.40:${LD_PRELOAD}"
 
 # Run the model
@@ -83,6 +89,7 @@ mpirun -n $((TENSOR_PARA_SIZE * PIPELINE_PARA_SIZE)) \
     -x MOE_CHECKPOINT_INTERVAL \
     -x MOE_MAX_CHECKPOINTS \
     -x MOE_CHECKPOINT_POLICY \
+    -x CONTEXT_ATTENTION_BMM1_HALF_ACCUM \
     --bind-to none \
     -x CUDA_VISIBLE_DEVICES \
     -x LD_LIBRARY_PATH \

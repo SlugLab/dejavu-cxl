@@ -128,6 +128,11 @@ public:
         is_restart_(is_restart)
     {
 
+        // Create our own cuBLAS handle instead of using PyTorch's
+        // This avoids potential configuration conflicts
+        check_cuda_error(cublasCreate(&cublasHandle_));
+        // Set math mode for Hopper/H100 GPUs - enable tensor op math for better performance
+        check_cuda_error(cublasSetMathMode(cublasHandle_, CUBLAS_TENSOR_OP_MATH));
         check_cuda_error(cublasLtCreate(&cublasltHandle_));
         cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
         cublas_wrapper_mutex_ = new std::mutex();
@@ -337,6 +342,7 @@ public:
         ft::ftNcclParamDestroy(pipeline_para_);
         ft::ftNcclParamDestroy(cache_stream_para_);
         printf("After deleting comms\n");
+        cublasDestroy(cublasHandle_);
         cublasLtDestroy(cublasltHandle_);
         printf("After cublasLtDestroy\n");
 
@@ -449,19 +455,20 @@ public:
         printf("Inside ParallelGptOP FORWARD!!!\n");
 
         int return_cum_log_probs = return_cum_log_probs_opt.has_value() ? (int)return_cum_log_probs_opt.value() : 0;
-        // auto stream                 = at::cuda::getCurrentCUDAStream().stream();
+        // Use our own stream for stability
         if (stream_ == NULL) {
             stream_ = (cudaStream_t*)malloc(sizeof(cudaStream_t));
             cudaStreamCreate(stream_);
             allocator = new ft::Allocator<ft::AllocatorType::TH>();
         }
-        cudaStream_t   stream       = *stream_;
-        cublasHandle_t cublasHandle = at::cuda::getCurrentCUDABlasHandle();
-        cublasSetStream(cublasHandle, stream);
+        cudaStream_t stream = *stream_;
+        // Use PyTorch's cuBLAS handle for better compatibility with PyTorch's CUDA setup
+        cublasHandle_t pytorchCublasHandle = at::cuda::getCurrentCUDABlasHandle();
+        cublasSetStream(pytorchCublasHandle, stream);
         allocator->setStream(stream);
 
         ft::cublasMMWrapper cublas_wrapper = ft::cublasMMWrapper(
-            cublasHandle, cublasltHandle_, stream, cublas_algo_map_, cublas_wrapper_mutex_, allocator);
+            pytorchCublasHandle, cublasltHandle_, stream, cublas_algo_map_, cublas_wrapper_mutex_, allocator);
 
         if (std::is_same<T, half>::value) {
             cublas_wrapper.setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
@@ -872,6 +879,7 @@ private:
     ft::NcclParam pipeline_para_;
     ft::NcclParam cache_stream_para_;
 
+    cublasHandle_t           cublasHandle_;
     cublasLtHandle_t         cublasltHandle_;
     std::mutex*              cublas_wrapper_mutex_;
     ft::cublasAlgoMap*       cublas_algo_map_;

@@ -91,6 +91,7 @@ private:
     std::vector<th::Tensor> int8_weights_;
     std::vector<th::Tensor> int8_scales_;
 
+    cublasHandle_t        cublas_handle_;
     cublasLtHandle_t      cublaslt_handle_;
     std::mutex*           cublas_wrapper_mutex_;
     ft::cublasAlgoMap*    cublas_algo_map_;

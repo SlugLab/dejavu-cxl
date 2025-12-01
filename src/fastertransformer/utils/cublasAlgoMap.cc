@@ -138,8 +138,8 @@ cublasAlgoMap::getAlgo(const int batch_count, const int m, const int n, const in
     }
     else {
         cublasLtMatmulAlgo_info tmp_algo;
-        tmp_algo.algoId =
-            static_cast<int>(data_type == FLOAT_DATATYPE ? CUBLAS_GEMM_DEFAULT : CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+        // Use CUBLAS_GEMM_DEFAULT for better compatibility across different configurations
+        tmp_algo.algoId = static_cast<int>(CUBLAS_GEMM_DEFAULT);
         tmp_algo.customOption    = -1;
         tmp_algo.tile            = -1;
         tmp_algo.splitK_val      = -1;
