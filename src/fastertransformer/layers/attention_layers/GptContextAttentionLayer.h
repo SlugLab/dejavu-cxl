@@ -94,7 +94,8 @@ namespace fastertransformer
                              bool is_free_buffer_after_forward,
                              bool is_qk_buf_float,
                              bool sparse = false,
-                             int int8_mode = 0);
+                             int int8_mode = 0,
+                             size_t hidden_size = 0);
 
     GptContextAttentionLayer(size_t max_batch_size,
                              size_t max_seq_len,
@@ -107,7 +108,8 @@ namespace fastertransformer
                              bool is_free_buffer_after_forward,
                              bool is_qk_buf_float,
                              bool sparse = false,
-                             int int8_mode = 0);
+                             int int8_mode = 0,
+                             size_t hidden_size = 0);
 
     GptContextAttentionLayer(size_t max_batch_size,
                              size_t max_seq_len,
@@ -122,7 +124,8 @@ namespace fastertransformer
                              bool is_free_buffer_after_forward,
                              bool is_qk_buf_float,
                              bool sparse = false,
-                             int int8_mode = 0);
+                             int int8_mode = 0,
+                             size_t hidden_size = 0);
 
     GptContextAttentionLayer(GptContextAttentionLayer<T> const &attention_layer);
 

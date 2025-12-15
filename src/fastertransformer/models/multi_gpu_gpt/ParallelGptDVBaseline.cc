@@ -88,7 +88,8 @@ void ParallelGptDVBaseline<T>::initialize()
                                                             true,
                                                             &cache_manager_,
                                                             &ubatch_phase_,
-                                                            num_slots_);
+                                                            num_slots_,
+                                                            hidden_units_);
 
     gpt_decoder_ = new ParallelGptDecoder<T>(0,
                                              head_num_,
@@ -109,7 +110,8 @@ void ParallelGptDVBaseline<T>::initialize()
                                              sparse_,
                                              int8_mode_,
                                              custom_all_reduce_comm_,
-                                             enable_custom_all_reduce_);
+                                             enable_custom_all_reduce_,
+                                             hidden_units_);
 }
 
 template<typename T>
@@ -496,7 +498,8 @@ ParallelGptDVBaseline<T>::ParallelGptDVBaseline(size_t                          
                                                 int                                 int8_mode,
                                                 std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
                                                 int                                 enable_custom_all_reduce,
-                                                float                               shared_contexts_ratio):
+                                                float                               shared_contexts_ratio,
+                                                size_t                              hidden_size):
     BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, cuda_device_prop, sparse),
     head_num_(head_num),
     size_per_head_(size_per_head),
@@ -513,7 +516,7 @@ ParallelGptDVBaseline<T>::ParallelGptDVBaseline(size_t                          
     layernorm_eps_(gpt_variant_params.layernorm_eps),
     gpt_variant_params_(gpt_variant_params),
     beam_search_diversity_rate_(beam_search_diversity_rate),
-    hidden_units_(head_num_ * size_per_head),
+    hidden_units_(hidden_size > 0 ? hidden_size : head_num_ * size_per_head),
     top_k_(top_k),
     top_p_(top_p),
     random_seed_(random_seed),

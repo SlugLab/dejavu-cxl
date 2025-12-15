@@ -76,7 +76,8 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
     bool                                sparse,
     int                                 int8_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-    int                                 enable_custom_all_reduce):
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
     GptContextAttentionLayer<T>(max_batch_size,
                                 max_seq_len,
                                 head_num,
@@ -88,7 +89,8 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
                                 is_free_buffer_after_forward,
                                 is_qk_buf_float,
                                 sparse,
-                                int8_mode),
+                                int8_mode,
+                                hidden_size),
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce),
@@ -115,7 +117,8 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
     bool                                sparse,
     int                                 int8_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-    int                                 enable_custom_all_reduce):
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
     GptContextAttentionLayer<T>(max_batch_size,
                                 max_seq_len,
                                 head_num,
@@ -129,7 +132,8 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
                                 is_free_buffer_after_forward,
                                 is_qk_buf_float,
                                 sparse,
-                                int8_mode),
+                                int8_mode,
+                                hidden_size),
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce),

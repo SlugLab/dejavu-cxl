@@ -260,7 +260,8 @@ public:
                 int                                 int8_mode                = 0,
                 std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
                 int                                 enable_custom_all_reduce = 0,
-                float                               shared_contexts_ratio    = 1.0f);
+                float                               shared_contexts_ratio    = 1.0f,
+                size_t                              hidden_size              = 0);  // 0 = use head_num * size_per_head
 
     ParallelGpt(ParallelGpt<T> const& gpt);
 

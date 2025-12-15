@@ -37,7 +37,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
     bool                                is_sparse,
     int                                 int8_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-    int                                 enable_custom_all_reduce):
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
     DecoderSelfAttentionLayer<T>(max_batch_size,
                                  head_num,
                                  size_per_head,
@@ -51,7 +52,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
                                  allocator,
                                  is_free_buffer_after_forward,
                                  is_sparse,
-                                 int8_mode),
+                                 int8_mode,
+                                 hidden_size),
     do_all_reduce_(do_all_reduce),
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
@@ -74,7 +76,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
     bool                                is_sparse,
     int                                 int8_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-    int                                 enable_custom_all_reduce):
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
     TensorParallelDecoderSelfAttentionLayer(max_batch_size,
                                             head_num,
                                             size_per_head,
@@ -91,7 +94,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
                                             is_sparse,
                                             int8_mode,
                                             custom_all_reduce_comm,
-                                            enable_custom_all_reduce)
+                                            enable_custom_all_reduce,
+                                            hidden_size)
 
 {
 }
@@ -112,7 +116,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
     bool                                is_sparse,
     int                                 int8_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-    int                                 enable_custom_all_reduce):
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
     TensorParallelDecoderSelfAttentionLayer(max_batch_size,
                                             head_num,
                                             size_per_head,
@@ -129,7 +134,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
                                             is_sparse,
                                             int8_mode,
                                             custom_all_reduce_comm,
-                                            enable_custom_all_reduce)
+                                            enable_custom_all_reduce,
+                                            hidden_size)
 {
 }
 
@@ -149,7 +155,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
     bool                                is_sparse,
     int                                 int8_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-    int                                 enable_custom_all_reduce):
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
     TensorParallelDecoderSelfAttentionLayer(max_batch_size,
                                             head_num,
                                             size_per_head,
@@ -166,7 +173,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
                                             is_sparse,
                                             int8_mode,
                                             custom_all_reduce_comm,
-                                            enable_custom_all_reduce)
+                                            enable_custom_all_reduce,
+                                            hidden_size)
 {
 }
 

@@ -39,7 +39,9 @@ class GPTWeights:
                  has_pre_decoder_layernorm: bool = False,
                  has_post_decoder_layernorm: bool = True,
                  int8_mode: int = 0,
-                 inter_size: int = 0):
+                 inter_size: int = 0,
+                 hidden_size: int = 0,
+                 num_kv_heads: int = 0):
         assert (head_num % tensor_para_size == 0)
 
         if int8_mode == 1:
@@ -51,7 +53,8 @@ class GPTWeights:
             assert int8_mode == 0, "Invalid int8 mode for GPT. Must be 0 or 1"
 
         self.head_num = head_num
-        self.num_kv_heads = 2
+        # num_kv_heads: for GQA, defaults to head_num (MHA) if not specified
+        self.num_kv_heads = num_kv_heads if num_kv_heads > 0 else head_num
         self.size_per_head = size_per_head
         self.layer_num = layer_num
         self.vocab_size = vocab_size
@@ -69,8 +72,14 @@ class GPTWeights:
 
         local_head_num = head_num // tensor_para_size
         global_head_num = head_num
-        local_hidden_units = local_head_num * size_per_head
-        global_hidden_units = global_head_num * size_per_head
+        # hidden_size can be different from head_num * size_per_head for models like Qwen3
+        # where attention internal dimension is larger than hidden dimension
+        if hidden_size > 0:
+            global_hidden_units = hidden_size
+            local_hidden_units = hidden_size // tensor_para_size
+        else:
+            local_hidden_units = local_head_num * size_per_head
+            global_hidden_units = global_head_num * size_per_head
         local_inter_size = local_hidden_units * 4
         if inter_size != 0:
             assert inter_size % tensor_para_size == 0, f"inter_size({inter_size}) \% tensor_para_size({tensor_para_size}) must be 0"
@@ -342,16 +351,19 @@ class GPTWeights:
                 return torch.empty(0).to(str_type_map[self.inference_data_type])
         # Calculate shapes for quantization
         hidden = self.global_hidden_units
-        local_attn_out = hidden // self.tensor_para_size
+        # Attention internal dimension: head_num * size_per_head
+        # This can be different from hidden_size for models like Qwen3
+        attn_hidden = self.head_num * self.size_per_head
+        local_attn_out = attn_hidden // self.tensor_para_size
 
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.weight.bin", is_load(i), (hidden,))
                  for i in range(self.layer_num)])
         w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.input_layernorm.bias.bin", is_load(i), (hidden,))
                  for i in range(self.layer_num)])
 
-        # QKV weights - need to calculate combined size
-        # For Qwen2-MoE with GQA: Q + K + V
-        qkv_out_dim = hidden + 2 * (hidden // self.head_num * self.num_kv_heads)
+        # QKV weights - after GQA expansion during conversion, all Q/K/V have same dimension
+        # QKV output dimension: 3 * head_num * size_per_head (after K/V expansion)
+        qkv_out_dim = 3 * attn_hidden
         qkv_split = qkv_out_dim // self.tensor_para_size
 
         w.extend([load_to_torch(
@@ -563,7 +575,9 @@ class GPT(nn.Module):
                  prompt_world_size: int = 0,
                  token_world_size: int = 0,
                  torch_rank: int = 0,
-                 restart: bool = False):
+                 restart: bool = False,
+                 hidden_size: int = 0,
+                 num_kv_heads: int = 0):
         print(f"[DEBUG] GPT.__init__ started")
         super().__init__()
         print(f"[DEBUG] super().__init__() completed")
@@ -603,6 +617,8 @@ class GPT(nn.Module):
         self.token_world_size = token_world_size
         self.torch_rank = dist.get_rank() if dist.is_initialized() else torch_rank
         self.restart = restart
+        self.hidden_size = hidden_size
+        self.num_kv_heads = num_kv_heads
 
         print(f"[DEBUG] Setting class variables...")
         assert torch.cuda.is_available(), "CUDA is required for this model."
@@ -640,7 +656,9 @@ class GPT(nn.Module):
                                   has_adapters=self.has_adapters,
                                   adapter_inter_size=self.adapter_inter_size,
                                   int8_mode=int8_mode,
-                                  inter_size=inter_size)
+                                  inter_size=inter_size,
+                                  hidden_size=hidden_size,
+                                  num_kv_heads=num_kv_heads)
         print(f"[DEBUG] GPTWeights created successfully")
 
         # Prepare for tensor/pipeline parallel

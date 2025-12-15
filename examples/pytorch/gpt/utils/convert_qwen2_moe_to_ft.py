@@ -82,13 +82,18 @@ def convert_qwen2_moe_to_ft(args):
     num_layers = config['num_hidden_layers']
     hidden_size = config['hidden_size']
     num_attention_heads = config['num_attention_heads']
-    num_kv_heads = config['num_key_value_heads']
-    head_dim = hidden_size // num_attention_heads
+    num_kv_heads = config.get('num_key_value_heads', num_attention_heads)
+    # Use explicit head_dim from config if available, otherwise calculate
+    head_dim = config.get('head_dim', hidden_size // num_attention_heads)
     vocab_size = config['vocab_size']
     intermediate_size = config.get('intermediate_size', hidden_size * 4)
     num_experts = config.get('num_experts', 0)
     num_experts_per_tok = config.get('num_experts_per_tok', 0)
     moe_intermediate_size = config.get('moe_intermediate_size', intermediate_size)
+
+    # GQA ratio: how many Q heads share each KV head
+    gqa_ratio = num_attention_heads // num_kv_heads
+    use_gqa = (num_kv_heads != num_attention_heads)
 
     print(f"\nModel config:")
     print(f"  Layers: {num_layers}")
@@ -96,18 +101,23 @@ def convert_qwen2_moe_to_ft(args):
     print(f"  Attention heads: {num_attention_heads}")
     print(f"  KV heads: {num_kv_heads}")
     print(f"  Head dim: {head_dim}")
+    print(f"  GQA enabled: {use_gqa} (ratio: {gqa_ratio}:1)")
     print(f"  Vocab size: {vocab_size}")
     print(f"  Num experts: {num_experts}")
     print(f"  Experts per token: {num_experts_per_tok}")
+    print(f"  MoE intermediate size: {moe_intermediate_size}")
     print(f"  Tensor parallel size: {args.infer_gpu_num}")
 
     # Save config.ini for FasterTransformer
+    # For MoE models, use moe_intermediate_size; for dense models, use intermediate_size
+    ft_inter_size = moe_intermediate_size if num_experts > 0 else intermediate_size
+
     ft_config = configparser.ConfigParser()
     ft_config['gpt'] = {
         'model_name': 'qwen2_moe',
         'head_num': str(num_attention_heads),
         'size_per_head': str(head_dim),
-        'inter_size': str(intermediate_size),
+        'inter_size': str(ft_inter_size),
         'num_layer': str(num_layers),
         'vocab_size': str(vocab_size),
         'start_id': str(config.get('bos_token_id', 151643)),
@@ -116,6 +126,7 @@ def convert_qwen2_moe_to_ft(args):
         'weight_data_type': args.weight_data_type,
         'tensor_para_size': str(args.infer_gpu_num),
         'layernorm_eps': str(config.get('rms_norm_eps', 1e-6)),
+        'num_kv_heads': str(num_kv_heads),
     }
 
     # Add MoE structure if present
@@ -150,9 +161,11 @@ def convert_qwen2_moe_to_ft(args):
 
     # Convert LM head
     if 'lm_head.weight' in hf_weights:
-        lm_head = hf_weights['lm_head.weight'].float().numpy().astype(np_weight_dtype)
-        lm_head.tofile(saved_dir / "model.lm_head.weight.bin")
-        print(f"  Saved LM head: {lm_head.shape}")
+        lm_head = hf_weights['lm_head.weight']
+        # Transpose for CUBLAS column-major format
+        lm_head_transposed = lm_head.T.contiguous().float().numpy().astype(np_weight_dtype)
+        lm_head_transposed.tofile(saved_dir / "model.lm_head.weight.bin")
+        print(f"  Saved LM head: {lm_head.shape} (transposed to {lm_head_transposed.shape})")
 
     # Convert layer weights
     print(f"\nConverting {num_layers} transformer layers...")
@@ -175,8 +188,27 @@ def convert_qwen2_moe_to_ft(args):
             k_weight = hf_weights[f"{prefix}.self_attn.k_proj.weight"]
             v_weight = hf_weights[f"{prefix}.self_attn.v_proj.weight"]
 
-            # For now, simple concatenation and splitting
-            # TODO: Proper GQA handling
+            # Handle GQA: expand K and V weights to match Q heads
+            # Q shape: [num_attention_heads * head_dim, hidden_size]
+            # K/V shape: [num_kv_heads * head_dim, hidden_size]
+            # We need to expand K/V to [num_attention_heads * head_dim, hidden_size]
+            if use_gqa and gqa_ratio > 1:
+                # Reshape K to [num_kv_heads, head_dim, hidden_size]
+                k_reshaped = k_weight.view(num_kv_heads, head_dim, hidden_size)
+                # Repeat each KV head gqa_ratio times: [num_attention_heads, head_dim, hidden_size]
+                k_expanded = k_reshaped.repeat_interleave(gqa_ratio, dim=0)
+                # Reshape back to [num_attention_heads * head_dim, hidden_size]
+                k_weight = k_expanded.view(num_attention_heads * head_dim, hidden_size)
+
+                # Same for V
+                v_reshaped = v_weight.view(num_kv_heads, head_dim, hidden_size)
+                v_expanded = v_reshaped.repeat_interleave(gqa_ratio, dim=0)
+                v_weight = v_expanded.view(num_attention_heads * head_dim, hidden_size)
+
+                if layer_idx == 0:
+                    print(f"  GQA: Expanded K/V from {num_kv_heads} to {num_attention_heads} heads")
+
+            # Concatenate Q, K, V
             qkv_combined = torch.cat([q_weight, k_weight, v_weight], dim=0)
 
             # Split for tensor parallelism
@@ -184,7 +216,10 @@ def convert_qwen2_moe_to_ft(args):
             for tp_rank in range(tensor_para_size):
                 start_idx = tp_rank * split_size
                 end_idx = (tp_rank + 1) * split_size
-                qkv_split = qkv_combined[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
+                # Transpose to match FasterTransformer's column-major GEMM format
+                # PyTorch row-major [qkv_dim, hidden_size] -> save as [hidden_size, qkv_dim] row-major
+                # which CUBLAS reads as column-major [qkv_dim, hidden_size]
+                qkv_split = qkv_combined[start_idx:end_idx, :].T.contiguous().float().numpy().astype(np_weight_dtype)
                 qkv_split.tofile(saved_dir / f"model.layers.{layer_idx}.attention.query_key_value.weight.{tp_rank}.bin")
 
             # QKV biases if present
@@ -192,6 +227,18 @@ def convert_qwen2_moe_to_ft(args):
                 q_bias = hf_weights[f"{prefix}.self_attn.q_proj.bias"]
                 k_bias = hf_weights[f"{prefix}.self_attn.k_proj.bias"]
                 v_bias = hf_weights[f"{prefix}.self_attn.v_proj.bias"]
+
+                # Expand K/V biases for GQA
+                if use_gqa and gqa_ratio > 1:
+                    # Reshape to [num_kv_heads, head_dim]
+                    k_bias_reshaped = k_bias.view(num_kv_heads, head_dim)
+                    k_bias_expanded = k_bias_reshaped.repeat_interleave(gqa_ratio, dim=0)
+                    k_bias = k_bias_expanded.view(num_attention_heads * head_dim)
+
+                    v_bias_reshaped = v_bias.view(num_kv_heads, head_dim)
+                    v_bias_expanded = v_bias_reshaped.repeat_interleave(gqa_ratio, dim=0)
+                    v_bias = v_bias_expanded.view(num_attention_heads * head_dim)
+
                 qkv_bias_combined = torch.cat([q_bias, k_bias, v_bias], dim=0)
 
                 split_size = qkv_bias_combined.shape[0] // tensor_para_size
@@ -210,7 +257,8 @@ def convert_qwen2_moe_to_ft(args):
             for tp_rank in range(tensor_para_size):
                 start_idx = tp_rank * split_size
                 end_idx = (tp_rank + 1) * split_size
-                o_proj_split = o_proj_weight[:, start_idx:end_idx].float().numpy().astype(np_weight_dtype)
+                # Transpose for CUBLAS column-major format
+                o_proj_split = o_proj_weight[:, start_idx:end_idx].T.contiguous().float().numpy().astype(np_weight_dtype)
                 o_proj_split.tofile(saved_dir / f"model.layers.{layer_idx}.attention.dense.weight.{tp_rank}.bin")
 
         # 4. Post-attention LayerNorm
@@ -237,7 +285,8 @@ def convert_qwen2_moe_to_ft(args):
                     for tp_rank in range(tensor_para_size):
                         start_idx = tp_rank * split_size
                         end_idx = (tp_rank + 1) * split_size
-                        weight_split = gate_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
+                        # Transpose for CUBLAS column-major format
+                        weight_split = gate_proj[start_idx:end_idx, :].T.contiguous().float().numpy().astype(np_weight_dtype)
                         weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight.{tp_rank}.bin")
 
                 # Expert up projection
@@ -247,7 +296,8 @@ def convert_qwen2_moe_to_ft(args):
                     for tp_rank in range(tensor_para_size):
                         start_idx = tp_rank * split_size
                         end_idx = (tp_rank + 1) * split_size
-                        weight_split = up_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
+                        # Transpose for CUBLAS column-major format
+                        weight_split = up_proj[start_idx:end_idx, :].T.contiguous().float().numpy().astype(np_weight_dtype)
                         weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight.{tp_rank}.bin")
 
                 # Expert down projection
@@ -258,7 +308,8 @@ def convert_qwen2_moe_to_ft(args):
                     for tp_rank in range(tensor_para_size):
                         start_idx = tp_rank * split_size
                         end_idx = (tp_rank + 1) * split_size
-                        weight_split = down_proj[:, start_idx:end_idx].float().numpy().astype(np_weight_dtype)
+                        # Transpose for CUBLAS column-major format
+                        weight_split = down_proj[:, start_idx:end_idx].T.contiguous().float().numpy().astype(np_weight_dtype)
                         weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight.{tp_rank}.bin")
 
             # Shared expert (if present)
@@ -270,7 +321,8 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    weight_split = gate_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
+                    # Transpose for CUBLAS column-major format
+                    weight_split = gate_proj[start_idx:end_idx, :].T.contiguous().float().numpy().astype(np_weight_dtype)
                     weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.shared_expert.gate_proj.weight.{tp_rank}.bin")
 
                 # Shared expert up projection
@@ -279,7 +331,8 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    weight_split = up_proj[start_idx:end_idx, :].float().numpy().astype(np_weight_dtype)
+                    # Transpose for CUBLAS column-major format
+                    weight_split = up_proj[start_idx:end_idx, :].T.contiguous().float().numpy().astype(np_weight_dtype)
                     weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.shared_expert.up_proj.weight.{tp_rank}.bin")
 
                 # Shared expert down projection
@@ -288,7 +341,8 @@ def convert_qwen2_moe_to_ft(args):
                 for tp_rank in range(tensor_para_size):
                     start_idx = tp_rank * split_size
                     end_idx = (tp_rank + 1) * split_size
-                    weight_split = down_proj[:, start_idx:end_idx].float().numpy().astype(np_weight_dtype)
+                    # Transpose for CUBLAS column-major format
+                    weight_split = down_proj[:, start_idx:end_idx].T.contiguous().float().numpy().astype(np_weight_dtype)
                     weight_split.tofile(saved_dir / f"model.layers.{layer_idx}.mlp.shared_expert.down_proj.weight.{tp_rank}.bin")
 
     print(f"\n✅ Conversion complete! Weights saved to {saved_dir}")

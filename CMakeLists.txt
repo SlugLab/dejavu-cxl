@@ -26,7 +26,7 @@ set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 # Use system Protobuf headers discovered by find_package(Protobuf)
 # Avoid vendored headers to prevent ABI mismatches with the linked libprotobuf.
 
-find_package(CUDA 10.2 REQUIRED)
+find_package(CUDA 12.8 REQUIRED)
 
 if(${CUDA_VERSION_MAJOR} VERSION_GREATER_EQUAL "11")
   add_definitions("-DENABLE_BF16")

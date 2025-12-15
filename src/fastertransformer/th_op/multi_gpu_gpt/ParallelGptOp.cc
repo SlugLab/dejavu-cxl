@@ -57,7 +57,8 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                              const int64_t                 prompt_world_size,
                              const int64_t                 token_world_size,
                              const int64_t                 torch_rank,
-                             const bool                    is_restart):
+                             const bool                    is_restart,
+                             const int64_t                 hidden_size):
     st_(weights[0].scalar_type())
 {
     // Debug prints to diagnose early constructor failures
@@ -130,7 +131,8 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                                      prompt_world_size,
                                      token_world_size,
                                      torch_rank,
-                                     is_restart);
+                                     is_restart,
+                                     hidden_size);
             break;
         case at::ScalarType::Half:
             ftgpt = new FTGpt<half>(head_num,
@@ -154,7 +156,8 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                                     prompt_world_size,
                                     token_world_size,
                                     torch_rank,
-                                    is_restart);
+                                    is_restart,
+                                    hidden_size);
             break;
         // BF16 path disabled in this build due to missing ParallelGpt<bf16> constructor
         default:
@@ -313,7 +316,8 @@ static auto fasterTransformerParallelGptTHS =
                               int64_t,
                               int64_t,
                               int64_t,
-                              bool>())
+                              bool,
+                              int64_t>())
         .def(
             "forward",
             static_cast<std::vector<at::Tensor> (torch_ext::ParallelGptOp::*)(

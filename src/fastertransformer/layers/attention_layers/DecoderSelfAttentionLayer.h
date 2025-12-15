@@ -81,8 +81,9 @@ public:
                               cublasMMWrapper* cublas_wrapper,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
-                              bool             sparse    = false,
-                              int              int8_mode = 0);
+                              bool             sparse      = false,
+                              int              int8_mode   = 0,
+                              size_t           hidden_size = 0);
 
     DecoderSelfAttentionLayer(size_t           max_batch_size,
                               size_t           head_num,
@@ -91,8 +92,9 @@ public:
                               cublasMMWrapper* cublas_wrapper,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
-                              bool             sparse    = false,
-                              int              int8_mode = 0);
+                              bool             sparse      = false,
+                              int              int8_mode   = 0,
+                              size_t           hidden_size = 0);
 
     DecoderSelfAttentionLayer(size_t           max_batch_size,
                               size_t           head_num,
@@ -102,8 +104,9 @@ public:
                               cublasMMWrapper* cublas_wrapper,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
-                              bool             sparse    = false,
-                              int              int8_mode = 0);
+                              bool             sparse      = false,
+                              int              int8_mode   = 0,
+                              size_t           hidden_size = 0);
 
     DecoderSelfAttentionLayer(size_t           max_batch_size,
                               size_t           head_num,
@@ -113,8 +116,9 @@ public:
                               cublasMMWrapper* cublas_wrapper,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
-                              bool             sparse    = false,
-                              int              int8_mode = 0);
+                              bool             sparse      = false,
+                              int              int8_mode   = 0,
+                              size_t           hidden_size = 0);
 
     DecoderSelfAttentionLayer(size_t           max_batch_size,
                               size_t           head_num,
@@ -126,8 +130,9 @@ public:
                               cublasMMWrapper* cublas_wrapper,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
-                              bool             sparse    = false,
-                              int              int8_mode = 0);
+                              bool             sparse      = false,
+                              int              int8_mode   = 0,
+                              size_t           hidden_size = 0);
 
     DecoderSelfAttentionLayer(size_t           max_batch_size,
                               size_t           head_num,
@@ -139,8 +144,9 @@ public:
                               cublasMMWrapper* cublas_wrapper,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
-                              bool             sparse    = false,
-                              int              int8_mode = 0);
+                              bool             sparse      = false,
+                              int              int8_mode   = 0,
+                              size_t           hidden_size = 0);
 
     DecoderSelfAttentionLayer(DecoderSelfAttentionLayer<T> const& attention_layer);
 

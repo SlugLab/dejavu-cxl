@@ -103,7 +103,8 @@ public:
           const int64_t              prompt_world_size,
           const int64_t              token_world_size,
           const int64_t              torch_rank,
-          const bool                 is_restart):
+          const bool                 is_restart,
+          const int64_t              hidden_size = 0):
         head_num_(head_num),
         size_per_head_(size_per_head),
         inter_size_(inter_size),
@@ -125,7 +126,8 @@ public:
         prompt_world_size_(prompt_world_size),
         token_world_size_(token_world_size),
         torch_rank_(torch_rank),
-        is_restart_(is_restart)
+        is_restart_(is_restart),
+        hidden_size_(hidden_size)
     {
 
         // Create our own cuBLAS handle instead of using PyTorch's
@@ -667,7 +669,8 @@ public:
                                              int8_mode_,
                                              nullptr,
                                              0,
-                                             shared_contexts_ratio_);
+                                             shared_contexts_ratio_,
+                                             hidden_size_);
 #endif
         }
 
@@ -858,6 +861,7 @@ private:
     const int64_t        token_world_size_;
     const int64_t        torch_rank_;
     const bool           is_restart_;
+    const int64_t        hidden_size_;  // 0 = use head_num * size_per_head
 
     const int64_t int8_mode_ = 0;
     bool reset_after_failure_ = false;
@@ -926,7 +930,8 @@ public:
                   const int64_t              prompt_world_size,
                   const int64_t              token_world_size,
                   const int64_t              torch_rank,
-                  const bool                 is_restart);
+                  const bool                 is_restart,
+                  const int64_t              hidden_size = 0);
 
     ~ParallelGptOp();
 

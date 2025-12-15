@@ -37,7 +37,8 @@ namespace fastertransformer
                                                                                sparse_,
                                                                                int8_mode_,
                                                                                custom_all_reduce_comm_,
-                                                                               enable_custom_all_reduce_);
+                                                                               enable_custom_all_reduce_,
+                                                                               hidden_units_);
 
         bool use_gated_activation = activation_type_ == ActivationType::GeGLU || activation_type_ == ActivationType::ReGLU;
         size_t max_inter_size = has_adapters_ ? std::max(inter_size_, adapter_inter_size_) : inter_size_;
@@ -103,7 +104,8 @@ namespace fastertransformer
                                               bool sparse,
                                               int int8_mode,
                                               std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
-                                              int enable_custom_all_reduce) : BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, nullptr, sparse),
+                                              int enable_custom_all_reduce,
+                                              size_t hidden_size) : BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, nullptr, sparse),
                                                                               max_batch_size_(max_batch_size),
                                                                               head_num_(head_num),
                                                                               size_per_head_(size_per_head),
@@ -117,7 +119,7 @@ namespace fastertransformer
                                                                               activation_type_(gpt_variant_params.activation_type),
                                                                               adapter_inter_size_(gpt_variant_params.adapter_inter_size),
                                                                               has_adapters_(gpt_variant_params.has_adapters),
-                                                                              hidden_units_(head_num_ * size_per_head_),
+                                                                              hidden_units_(hidden_size > 0 ? hidden_size : head_num_ * size_per_head_),
                                                                               tensor_para_(tensor_para),
                                                                               pipeline_para_(pipeline_para),
                                                                               int8_mode_(int8_mode),

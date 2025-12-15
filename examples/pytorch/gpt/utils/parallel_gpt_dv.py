@@ -79,5 +79,6 @@ class ParallelGPT(GPT):
             self.prompt_world_size,
             self.token_world_size,
             self.torch_rank,
-            self.restart)
+            self.restart,
+            self.hidden_size)  # hidden_size for GQA models where hidden != head_num * size_per_head
         self.build_model = True

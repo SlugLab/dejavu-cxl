@@ -54,7 +54,8 @@ public:
                                            bool                                sparse                   = false,
                                            int                                 int8_mode                = 0,
                                            std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
-                                           int                                 enable_custom_all_reduce = 0);
+                                           int                                 enable_custom_all_reduce = 0,
+                                           size_t                              hidden_size              = 0);
 
     TensorParallelGptContextAttentionLayer(size_t                              max_batch_size,
                                            size_t                              max_seq_len,
@@ -72,7 +73,8 @@ public:
                                            bool                                sparse                   = false,
                                            int                                 int8_mode                = 0,
                                            std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
-                                           int                                 enable_custom_all_reduce = 0);
+                                           int                                 enable_custom_all_reduce = 0,
+                                           size_t                              hidden_size              = 0);
 
     TensorParallelGptContextAttentionLayer(TensorParallelGptContextAttentionLayer<T> const& attention_layer);
 

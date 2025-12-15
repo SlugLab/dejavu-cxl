@@ -99,6 +99,10 @@ def main():
                            help='Vocabulary size')
     model_group.add_argument('--max_seq_len', type=int, default=32768,
                            help='Maximum sequence length')
+    model_group.add_argument('--hidden_size', type=int, default=0,
+                           help='Hidden size (if different from head_num * size_per_head)')
+    model_group.add_argument('--num_kv_heads', type=int, default=0,
+                           help='Number of KV heads for GQA (0 = same as head_num)')
 
     # MoE specific
     moe_group = parser.add_argument_group('MoE Configuration')
@@ -271,7 +275,9 @@ def main():
         has_positional_encoding=False,  # Qwen2 uses RoPE
         gpt_with_moe=True,
         activation_type="Silu",  # Qwen2 uses SwiGLU/Silu
-        layernorm_type="pre_layernorm"
+        layernorm_type="pre_layernorm",
+        hidden_size=args.hidden_size,
+        num_kv_heads=args.num_kv_heads
     )
 
     print(f"[Rank {rank}] ✓ Model initialized and weights loaded successfully")

@@ -191,7 +191,8 @@ public:
                               bool                                copy_cache               = false,
                               BaseCacheManager**                  cache_manager            = nullptr,
                               std::vector<bool>*                  is_token_phase           = nullptr,
-                              int                                 num_slots                = 0);
+                              int                                 num_slots                = 0,
+                              size_t                              hidden_size              = 0);
 
     ParallelGptContextDecoder(ParallelGptContextDecoder<T> const& decoder);
 

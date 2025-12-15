@@ -11,13 +11,15 @@ export MOE_HOST_BUFFER_SIZE=64   # Reduce from 128MB to 64MB
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
 export CUDA_MODULE_LOADING=LAZY
 
-# Qwen3-30B-A3B Model Configuration
+# Qwen3-30B-A3B Model Configuration (from config.json)
 export LAYER_NUM=48
 export HEAD_NUM=32
-export SIZE_PER_HEAD=64        # 2048 hidden / 32 heads
-export INTER_SIZE=6144
+export SIZE_PER_HEAD=128       # head_dim from config.json
+export INTER_SIZE=768          # moe_intermediate_size from config.json
 export VOCAB_SIZE=151936
 export MAX_SEQ_LEN=2048  # Reduce from 40960 to minimize KV cache memory
+export HIDDEN_SIZE=2048        # actual hidden_size from config.json
+export NUM_KV_HEADS=4          # num_key_value_heads for GQA (already expanded in weights)
 
 # MoE specific
 export EXPERT_NUM=128
@@ -43,11 +45,11 @@ export TEMPERATURE=0.7
 export TOP_K=50
 export TOP_P=0.95
 
-# Paths - Using NF4 quantized model
-export CKPT_PATH="/root/Qwen3-30B-A3B-FT/1-gpu-nf4"
-export VOCAB_FILE="/root/Qwen3-30B-A3B/vocab.json"
-export MERGES_FILE="/root/Qwen3-30B-A3B/merges.txt"
-export LIB_PATH="/root/dejavu1/build/lib/libth_transformer.so"
+# Paths - Using converted FT model
+export CKPT_PATH="/home/victoryang00/Qwen3-30B-A3B-FT/1-gpu"
+export VOCAB_FILE="/home/victoryang00/Qwen3-30B-A3B/vocab.json"
+export MERGES_FILE="/home/victoryang00/Qwen3-30B-A3B/merges.txt"
+export LIB_PATH="/home/victoryang00/dejavu-cxl/build/lib/libth_transformer.so"
 
 # NCCL configuration for MIG devices
 export NCCL_DEBUG=WARN
@@ -67,17 +69,14 @@ export FT_LOG_LEVEL=INFO
 # This avoids the problematic cublasGemmStridedBatchedEx with FP16 in, FP32 out
 export CONTEXT_ATTENTION_BMM1_HALF_ACCUM=ON
 
-# Library paths - Add cuDNN and other dependencies
-export LD_LIBRARY_PATH="/opt/spack/opt/spack/linux-sapphirerapids/cudnn-9.8.0.87-12-olz7aszw2apm7buppaen2uxq5qpbvxzh/lib:${LD_LIBRARY_PATH}"
+# Library paths - Add cuDNN, NCCL and other dependencies
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/opt/miniconda3/lib/python3.13/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}"
 
-# Fix ABI compatibility issues by preloading system libraries
-# Use LD_LIBRARY_PATH to prefer system cuBLAS
-export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 # Preload other system libraries for ABI compatibility
-export LD_PRELOAD="/lib/x86_64-linux-gnu/libgcc_s.so.1:/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libm.so.6:/lib/x86_64-linux-gnu/libprotobuf.so.32:/lib/x86_64-linux-gnu/libmpi_cxx.so.40:${LD_PRELOAD}"
+export LD_PRELOAD="/lib/x86_64-linux-gnu/libgcc_s.so.1:/lib/x86_64-linux-gnu/libstdc++.so.6:/lib/x86_64-linux-gnu/libm.so.6:${LD_PRELOAD}"
 
 # Run the model
-cd /root/dejavu1/build
+cd /home/victoryang00/dejavu-cxl/build
 
 # Use single GPU
 export CUDA_VISIBLE_DEVICES="0"
@@ -101,6 +100,8 @@ mpirun -n $((TENSOR_PARA_SIZE * PIPELINE_PARA_SIZE)) \
         --inter_size $INTER_SIZE \
         --vocab_size $VOCAB_SIZE \
         --max_seq_len $MAX_SEQ_LEN \
+        --hidden_size $HIDDEN_SIZE \
+        --num_kv_heads $NUM_KV_HEADS \
         --expert_num $EXPERT_NUM \
         --moe_k $MOE_K \
         --moe_layer_index $MOE_LAYER_INDEX \

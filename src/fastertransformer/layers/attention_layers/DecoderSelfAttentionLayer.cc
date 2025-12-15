@@ -262,12 +262,13 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                                         IAllocator*      allocator,
                                                         bool             is_free_buffer_after_forward,
                                                         bool             sparse,
-                                                        int              int8_mode):
+                                                        int              int8_mode,
+                                                        size_t           hidden_size):
     BaseAttentionLayer<T>(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, sparse),
     max_batch_size_(max_batch_size),
     head_num_(head_num),
     size_per_head_(size_per_head),
-    hidden_units_(head_num_ * size_per_head_),
+    hidden_units_(hidden_size > 0 ? hidden_size : head_num_ * size_per_head_),
     local_head_num_(local_head_num),
     local_hidden_units_(local_head_num_ * size_per_head_),
     rotary_embedding_dim_(rotary_embedding_dim),
@@ -295,7 +296,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                                         IAllocator*      allocator,
                                                         bool             is_free_buffer_after_forward,
                                                         bool             sparse,
-                                                        int              int8_mode):
+                                                        int              int8_mode,
+                                                        size_t           hidden_size):
     DecoderSelfAttentionLayer<T>(max_batch_size,
                                  head_num,
                                  size_per_head,
@@ -309,7 +311,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                  allocator,
                                  is_free_buffer_after_forward,
                                  sparse,
-                                 int8_mode)
+                                 int8_mode,
+                                 hidden_size)
 {
 }
 
@@ -323,7 +326,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                                         IAllocator*      allocator,
                                                         bool             is_free_buffer_after_forward,
                                                         bool             sparse,
-                                                        int              int8_mode):
+                                                        int              int8_mode,
+                                                        size_t           hidden_size):
     DecoderSelfAttentionLayer<T>(max_batch_size,
                                  head_num,
                                  size_per_head,
@@ -337,7 +341,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                  allocator,
                                  is_free_buffer_after_forward,
                                  sparse,
-                                 int8_mode)
+                                 int8_mode,
+                                 hidden_size)
 {
 }
 
@@ -351,7 +356,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                                         IAllocator*      allocator,
                                                         bool             is_free_buffer_after_forward,
                                                         bool             sparse,
-                                                        int              int8_mode):
+                                                        int              int8_mode,
+                                                        size_t           hidden_size):
     DecoderSelfAttentionLayer<T>(max_batch_size,
                                  head_num,
                                  size_per_head,
@@ -365,7 +371,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                  allocator,
                                  is_free_buffer_after_forward,
                                  sparse,
-                                 int8_mode)
+                                 int8_mode,
+                                 hidden_size)
 {
 }
 
@@ -381,7 +388,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                                         IAllocator*      allocator,
                                                         bool             is_free_buffer_after_forward,
                                                         bool             sparse,
-                                                        int              int8_mode):
+                                                        int              int8_mode,
+                                                        size_t           hidden_size):
     DecoderSelfAttentionLayer<T>(max_batch_size,
                                  head_num,
                                  size_per_head,
@@ -395,7 +403,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                  allocator,
                                  is_free_buffer_after_forward,
                                  sparse,
-                                 int8_mode)
+                                 int8_mode,
+                                 hidden_size)
 {
 }
 
@@ -411,7 +420,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                                         IAllocator*      allocator,
                                                         bool             is_free_buffer_after_forward,
                                                         bool             sparse,
-                                                        int              int8_mode):
+                                                        int              int8_mode,
+                                                        size_t           hidden_size):
     DecoderSelfAttentionLayer<T>(max_batch_size,
                                  head_num,
                                  size_per_head,
@@ -425,7 +435,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t           max_bat
                                  allocator,
                                  is_free_buffer_after_forward,
                                  sparse,
-                                 int8_mode)
+                                 int8_mode,
+                                 hidden_size)
 {
 }
 

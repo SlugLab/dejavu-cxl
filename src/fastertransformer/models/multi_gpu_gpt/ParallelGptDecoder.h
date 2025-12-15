@@ -108,7 +108,8 @@ public:
                        bool                                sparse                    = false,
                        int                                 int8_mode                 = 0,
                        std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm    = nullptr,
-                       int                                 enable_custom_all_reduce_ = 0);
+                       int                                 enable_custom_all_reduce_ = 0,
+                       size_t                              hidden_size               = 0);
 
     ParallelGptDecoder(ParallelGptDecoder<T> const& decoder);
 
