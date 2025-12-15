@@ -142,6 +142,55 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
     FT_CHECK(head_num % tensor_para_.world_size_ == 0);
 }
 
+// GQA constructor with separate kv_head_num
+template<typename T>
+TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLayer(
+    size_t                              max_batch_size,
+    size_t                              max_seq_len,
+    size_t                              head_num,
+    size_t                              kv_head_num,
+    size_t                              size_per_head,
+    size_t                              rotary_embedding_dim,
+    bool                                neox_rotary_style,
+    NcclParam                           tensor_para,
+    cudaStream_t                        stream,
+    cublasMMWrapper*                    cublas_wrapper,
+    IAllocator*                         allocator,
+    bool                                do_all_reduce,
+    bool                                is_free_buffer_after_forward,
+    bool                                is_qk_buf_float,
+    bool                                sparse,
+    int                                 int8_mode,
+    std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
+    int                                 enable_custom_all_reduce,
+    size_t                              hidden_size):
+    GptContextAttentionLayer<T>(max_batch_size,
+                                max_seq_len,
+                                head_num,
+                                size_per_head,
+                                head_num / tensor_para.world_size_,
+                                kv_head_num / tensor_para.world_size_,  // local_kv_head_num
+                                rotary_embedding_dim,
+                                neox_rotary_style,
+                                stream,
+                                cublas_wrapper,
+                                allocator,
+                                is_free_buffer_after_forward,
+                                is_qk_buf_float,
+                                sparse,
+                                int8_mode,
+                                hidden_size),
+    tensor_para_(tensor_para),
+    custom_all_reduce_comm_(custom_all_reduce_comm),
+    enable_custom_all_reduce_(enable_custom_all_reduce),
+    do_all_reduce_(do_all_reduce)
+{
+    FT_CHECK(head_num % tensor_para_.world_size_ == 0);
+    FT_CHECK(kv_head_num % tensor_para_.world_size_ == 0);
+    fprintf(stderr, "[FT][TPCA] GQA constructor: head_num=%zu, kv_head_num=%zu, tp_size=%d\n",
+            head_num, kv_head_num, tensor_para_.world_size_);
+}
+
 template<typename T>
 TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLayer(
     TensorParallelGptContextAttentionLayer<T> const& attention_layer):

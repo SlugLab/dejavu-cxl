@@ -76,6 +76,27 @@ public:
                                            int                                 enable_custom_all_reduce = 0,
                                            size_t                              hidden_size              = 0);
 
+    // GQA constructor with separate kv_head_num
+    TensorParallelGptContextAttentionLayer(size_t                              max_batch_size,
+                                           size_t                              max_seq_len,
+                                           size_t                              head_num,
+                                           size_t                              kv_head_num,
+                                           size_t                              size_per_head,
+                                           size_t                              rotary_embedding_dim,
+                                           bool                                neox_rotary_style,
+                                           NcclParam                           tensor_para,
+                                           cudaStream_t                        stream,
+                                           cublasMMWrapper*                    cublas_wrapper,
+                                           IAllocator*                         allocator,
+                                           bool                                do_all_reduce,
+                                           bool                                is_free_buffer_after_forward,
+                                           bool                                is_qk_buf_float,
+                                           bool                                sparse                   = false,
+                                           int                                 int8_mode                = 0,
+                                           std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
+                                           int                                 enable_custom_all_reduce = 0,
+                                           size_t                              hidden_size              = 0);
+
     TensorParallelGptContextAttentionLayer(TensorParallelGptContextAttentionLayer<T> const& attention_layer);
 
     void

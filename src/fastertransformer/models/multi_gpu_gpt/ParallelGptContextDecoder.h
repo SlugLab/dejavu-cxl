@@ -65,6 +65,7 @@ private:
 
     // meta data
     size_t               head_num_;
+    size_t               num_kv_heads_;  // For GQA: number of KV heads (may differ from Q heads)
     size_t               size_per_head_;
     size_t               inter_size_;
     size_t               num_layer_;
@@ -192,7 +193,8 @@ public:
                               BaseCacheManager**                  cache_manager            = nullptr,
                               std::vector<bool>*                  is_token_phase           = nullptr,
                               int                                 num_slots                = 0,
-                              size_t                              hidden_size              = 0);
+                              size_t                              hidden_size              = 0,
+                              size_t                              num_kv_heads             = 0);
 
     ParallelGptContextDecoder(ParallelGptContextDecoder<T> const& decoder);
 

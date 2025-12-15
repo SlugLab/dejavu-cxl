@@ -187,6 +187,19 @@ public:
                 get_ptr<T>(weights_[i + 1 * layer_num_]);
             gpt_weights_.decoder_layer_weights[i]->self_attention_weights.query_weight.kernel =
                 get_ptr<T>(weights_[i + 2 * layer_num_]);
+            // Debug: print QKV weight pointer for layer 0
+            if (i == 0) {
+                const T* qkv_ptr = gpt_weights_.decoder_layer_weights[i]->self_attention_weights.query_weight.kernel;
+                int64_t tensor_numel = weights_[i + 2 * layer_num_].numel();
+                fprintf(stderr, "[FT][CTOR] Layer 0 QKV weight: ptr=%p numel=%ld index=%d\n",
+                        (void*)qkv_ptr, (long)tensor_numel, i + 2 * (int)layer_num_);
+                // Test if pointer is valid now
+                char test_buf[8];
+                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "[FT][CTOR] Layer 0 QKV pointer test: err=%s\n",
+                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                fflush(stderr);
+            }
             gpt_weights_.decoder_layer_weights[i]->self_attention_weights.query_weight.bias =
                 get_ptr<T>(weights_[i + 3 * layer_num_]);
             gpt_weights_.decoder_layer_weights[i]->self_attention_weights.attention_output_weight.kernel =
@@ -455,6 +468,17 @@ public:
     {
 
         printf("Inside ParallelGptOP FORWARD!!!\n");
+
+        // Debug: verify weight pointer at start of forward
+        {
+            const T* qkv_ptr = gpt_weights_.decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
+            fprintf(stderr, "[FT][FWD] Layer 0 QKV weight at forward start: ptr=%p\n", (void*)qkv_ptr);
+            char test_buf[8];
+            cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[FT][FWD] Layer 0 QKV pointer test at forward start: err=%s\n",
+                    test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+            fflush(stderr);
+        }
 
         int return_cum_log_probs = return_cum_log_probs_opt.has_value() ? (int)return_cum_log_probs_opt.value() : 0;
         // Use our own stream for stability
@@ -805,6 +829,18 @@ public:
 
 
         std::vector<ft::Tensor> ret;
+
+        // Debug: verify weight pointer just before gpt_ptr->forward
+        {
+            const T* qkv_ptr = gpt_weights_.decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
+            fprintf(stderr, "[FT][FWD] Layer 0 QKV weight before forward: ptr=%p\n", (void*)qkv_ptr);
+            char test_buf[8];
+            cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[FT][FWD] Layer 0 QKV pointer test before forward: err=%s\n",
+                    test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+            fflush(stderr);
+        }
+
         try {
 #ifdef TEST_FAILURES
             if (!gpt_ptr->reset_) {

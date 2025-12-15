@@ -41,6 +41,8 @@ namespace fastertransformer
     const size_t hidden_units_;
     const size_t local_head_num_;
     const size_t local_hidden_units_;
+    const size_t local_kv_head_num_;      // For GQA: number of KV heads (may differ from Q heads)
+    const size_t local_kv_hidden_units_;  // local_kv_head_num_ * size_per_head_
     const size_t rotary_embedding_dim_;
     const bool neox_rotary_style_;
 
@@ -116,6 +118,24 @@ namespace fastertransformer
                              size_t head_num,
                              size_t size_per_head,
                              size_t local_head_num,
+                             size_t rotary_embedding_dim,
+                             bool neox_rotary_style_,
+                             cudaStream_t stream,
+                             cublasMMWrapper *cublas_wrapper,
+                             IAllocator *allocator,
+                             bool is_free_buffer_after_forward,
+                             bool is_qk_buf_float,
+                             bool sparse = false,
+                             int int8_mode = 0,
+                             size_t hidden_size = 0);
+
+    // GQA constructor with separate kv_head_num
+    GptContextAttentionLayer(size_t max_batch_size,
+                             size_t max_seq_len,
+                             size_t head_num,
+                             size_t size_per_head,
+                             size_t local_head_num,
+                             size_t local_kv_head_num,  // GQA: number of KV heads
                              size_t rotary_embedding_dim,
                              bool neox_rotary_style_,
                              cudaStream_t stream,

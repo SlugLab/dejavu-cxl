@@ -2509,4 +2509,132 @@ INSTANTIATETRANSPOSEATTENTIONS(__nv_bfloat16);
 #endif
 #undef INSTANTIATETRANSPOSEATTENTIONS
 
+/*******************  invokeAddFusedQKVBiasTransposeGQA  ***********************/
+// GQA-aware QKV transpose with KV head repetition
+// Input QKV: [batch_size * seq_len, head_num * Dh + 2 * kv_head_num * Dh]
+// Output Q: [batch_size, head_num, seq_len, Dh]
+// Output K: [batch_size, head_num, seq_len, Dh] (repeated from kv_head_num)
+// Output V: [batch_size, head_num, seq_len, Dh] (repeated from kv_head_num)
+template<typename T>
+__global__ void add_fusedQKV_bias_transpose_GQA_kernel(T*         q_buf,
+                                                        T*         k_buf,
+                                                        T*         v_buf,
+                                                        const T*   QKV,
+                                                        const T*   qkv_bias,
+                                                        const int* padding_offset,
+                                                        const int  batch_size,
+                                                        const int  seq_len,
+                                                        const int  token_num,
+                                                        const int  head_num,
+                                                        const int  kv_head_num,
+                                                        const int  size_per_head)
+{
+    // Grid: (token_num, head_num)
+    // Each block handles one token and one output head
+    const int token_idx            = blockIdx.x;
+    const int output_head_idx      = blockIdx.y;
+    const int token_padding_offset = (padding_offset == nullptr) ? 0 : padding_offset[token_idx];
+    const int tgt_token_idx        = token_idx + token_padding_offset;
+
+    const int batch_idx = tgt_token_idx / seq_len;
+    const int seq_idx   = tgt_token_idx % seq_len;
+
+    // Calculate the repetition factor for KV heads
+    const int kv_repeat_factor = head_num / kv_head_num;
+    // Map output head to input KV head
+    const int kv_head_idx = output_head_idx / kv_repeat_factor;
+
+    const int q_hidden_units  = head_num * size_per_head;
+    const int kv_hidden_units = kv_head_num * size_per_head;
+
+    // Source offsets in the fused QKV buffer (per token)
+    // Layout: [Q (head_num * Dh), K (kv_head_num * Dh), V (kv_head_num * Dh)]
+    const int src_q_base = token_idx * (q_hidden_units + 2 * kv_hidden_units);
+    const int src_k_base = src_q_base + q_hidden_units;
+    const int src_v_base = src_k_base + kv_hidden_units;
+
+    // Destination offset: [batch, head, seq, Dh]
+    const int dst_offset = batch_idx * head_num * seq_len * size_per_head
+                          + output_head_idx * seq_len * size_per_head
+                          + seq_idx * size_per_head;
+
+    // Process Q
+    for (int d = threadIdx.x; d < size_per_head; d += blockDim.x) {
+        const int q_src_idx = src_q_base + output_head_idx * size_per_head + d;
+        T q_val = QKV[q_src_idx];
+        if (qkv_bias != nullptr) {
+            q_val = add(q_val, qkv_bias[output_head_idx * size_per_head + d]);
+        }
+        q_buf[dst_offset + d] = q_val;
+    }
+
+    // Process K (with repetition)
+    for (int d = threadIdx.x; d < size_per_head; d += blockDim.x) {
+        const int k_src_idx = src_k_base + kv_head_idx * size_per_head + d;
+        T k_val = QKV[k_src_idx];
+        if (qkv_bias != nullptr) {
+            // K bias offset is after Q bias
+            k_val = add(k_val, qkv_bias[q_hidden_units + kv_head_idx * size_per_head + d]);
+        }
+        k_buf[dst_offset + d] = k_val;
+    }
+
+    // Process V (with repetition)
+    for (int d = threadIdx.x; d < size_per_head; d += blockDim.x) {
+        const int v_src_idx = src_v_base + kv_head_idx * size_per_head + d;
+        T v_val = QKV[v_src_idx];
+        if (qkv_bias != nullptr) {
+            // V bias offset is after Q and K bias
+            v_val = add(v_val, qkv_bias[q_hidden_units + kv_hidden_units + kv_head_idx * size_per_head + d]);
+        }
+        v_buf[dst_offset + d] = v_val;
+    }
+}
+
+template<typename T>
+void invokeAddFusedQKVBiasTransposeGQA(T*           q_buf,
+                                       T*           k_buf,
+                                       T*           v_buf,
+                                       T*           QKV,
+                                       const T*     qkv_bias,
+                                       const int*   padding_offset,
+                                       const int    batch_size,
+                                       const int    seq_len,
+                                       const int    token_num,
+                                       const int    head_num,
+                                       const int    kv_head_num,
+                                       const int    size_per_head,
+                                       cudaStream_t stream)
+{
+    // Launch kernel: one block per (token, output_head) pair
+    dim3 grid(token_num, head_num);
+    dim3 block(min(size_per_head, 256));
+
+    add_fusedQKV_bias_transpose_GQA_kernel<<<grid, block, 0, stream>>>(
+        q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset,
+        batch_size, seq_len, token_num, head_num, kv_head_num, size_per_head);
+    sync_check_cuda_error();
+}
+
+#define INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA(T)                                                                       \
+    template void invokeAddFusedQKVBiasTransposeGQA(T*           q_buf,                                                  \
+                                                    T*           k_buf,                                                  \
+                                                    T*           v_buf,                                                  \
+                                                    T*           QKV,                                                    \
+                                                    const T*     qkv_bias,                                               \
+                                                    const int*   padding_offset,                                         \
+                                                    const int    batch_size,                                             \
+                                                    const int    seq_len,                                                \
+                                                    const int    token_num,                                              \
+                                                    const int    head_num,                                               \
+                                                    const int    kv_head_num,                                            \
+                                                    const int    size_per_head,                                          \
+                                                    cudaStream_t stream)
+INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA(float);
+INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA(half);
+#ifdef ENABLE_BF16
+INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA(__nv_bfloat16);
+#endif
+#undef INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA
+
 }  // namespace fastertransformer

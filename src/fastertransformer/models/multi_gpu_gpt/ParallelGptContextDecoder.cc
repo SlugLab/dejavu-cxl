@@ -38,22 +38,53 @@ template<typename T>
 void ParallelGptContextDecoder<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    self_attention_layer_ = new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
-                                                                          max_seq_len_,
-                                                                          head_num_,
-                                                                          size_per_head_,
-                                                                          tensor_para_,
-                                                                          stream_,
-                                                                          cublas_wrapper_,
-                                                                          allocator_,
-                                                                          true,
-                                                                          is_free_buffer_after_forward_,
-                                                                          is_qk_buf_float_,
-                                                                          sparse_,
-                                                                          int8_mode_,
-                                                                          custom_all_reduce_comm_,
-                                                                          enable_custom_all_reduce_,
-                                                                          hidden_units_);
+
+    // Check if GQA is enabled (different Q and KV head counts)
+    const bool is_gqa = (num_kv_heads_ != head_num_);
+
+    if (is_gqa) {
+        // Use GQA constructor with separate kv_head_num
+        fprintf(stderr, "[FT][PGCD] Initializing with GQA: head_num=%zu, kv_head_num=%zu\n",
+                head_num_, num_kv_heads_);
+        self_attention_layer_ = new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
+                                                                              max_seq_len_,
+                                                                              head_num_,
+                                                                              num_kv_heads_,
+                                                                              size_per_head_,
+                                                                              0,  // rotary_embedding_dim
+                                                                              false,  // neox_rotary_style
+                                                                              tensor_para_,
+                                                                              stream_,
+                                                                              cublas_wrapper_,
+                                                                              allocator_,
+                                                                              true,
+                                                                              is_free_buffer_after_forward_,
+                                                                              is_qk_buf_float_,
+                                                                              sparse_,
+                                                                              int8_mode_,
+                                                                              custom_all_reduce_comm_,
+                                                                              enable_custom_all_reduce_,
+                                                                              hidden_units_);
+    }
+    else {
+        // Use standard MHA constructor
+        self_attention_layer_ = new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
+                                                                              max_seq_len_,
+                                                                              head_num_,
+                                                                              size_per_head_,
+                                                                              tensor_para_,
+                                                                              stream_,
+                                                                              cublas_wrapper_,
+                                                                              allocator_,
+                                                                              true,
+                                                                              is_free_buffer_after_forward_,
+                                                                              is_qk_buf_float_,
+                                                                              sparse_,
+                                                                              int8_mode_,
+                                                                              custom_all_reduce_comm_,
+                                                                              enable_custom_all_reduce_,
+                                                                              hidden_units_);
+    }
 
     bool use_gated_activation = activation_type_ == ActivationType::GeGLU || activation_type_ == ActivationType::ReGLU;
     size_t max_inter_size     = has_adapters_ ? std::max(inter_size_, adapter_inter_size_) : inter_size_;
@@ -263,11 +294,13 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(size_t               max
                                                         BaseCacheManager**                  cache_manager,
                                                         std::vector<bool>*                  is_token_phase,
                                                         int                                 num_slots,
-                                                        size_t                              hidden_size):
+                                                        size_t                              hidden_size,
+                                                        size_t                              num_kv_heads):
     BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, nullptr, sparse),
     max_batch_size_(max_batch_size),
     max_seq_len_(max_seq_len),
     head_num_(head_num),
+    num_kv_heads_(num_kv_heads > 0 ? num_kv_heads : head_num),  // Default to head_num for MHA
     size_per_head_(size_per_head),
     inter_size_(inter_size),
     num_layer_(num_layer),
@@ -296,7 +329,8 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(size_t               max
     is_token_phase_(is_token_phase),
     num_slots_(num_slots)
 {
-
+    fprintf(stderr, "[FT][PGCD] Constructor: head_num=%zu, num_kv_heads=%zu, hidden_units=%zu\n",
+            head_num_, num_kv_heads_, hidden_units_);
     initialize();
 }
 
@@ -306,6 +340,7 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(ParallelGptContextDecode
     max_batch_size_(decoder.max_batch_size_),
     max_seq_len_(decoder.max_seq_len_),
     head_num_(decoder.head_num_),
+    num_kv_heads_(decoder.num_kv_heads_),
     size_per_head_(decoder.size_per_head_),
     inter_size_(decoder.inter_size_),
     num_layer_(decoder.num_layer_),
@@ -736,8 +771,34 @@ void ParallelGptContextDecoder<T>::forward(
                 POP_RANGE;
             }
 
+            // Debug: check weight pointer BEFORE layernorm
+            if (l == 0 && ite == 0) {
+                const T* qkv_ptr = layer_weight->self_attention_weights.query_weight.kernel;
+                const float* scale_ptr = layer_weight->self_attention_weights.query_weight.scale;
+                const T* gamma_ptr = layer_weight->pre_layernorm_weights.gamma;
+                const T* beta_ptr = layer_weight->pre_layernorm_weights.beta;
+                fprintf(stderr, "[FT][ContextDecoder] BEFORE pre-mha layernorm:\n");
+                fprintf(stderr, "  QKV ptr=%p\n", (void*)qkv_ptr);
+                fprintf(stderr, "  scale ptr=%p\n", (void*)scale_ptr);
+                fprintf(stderr, "  gamma ptr=%p, beta ptr=%p\n", (void*)gamma_ptr, (void*)beta_ptr);
+                fprintf(stderr, "  decoder_input=%p, decoder_normed_input_=%p\n", (void*)decoder_input, (void*)decoder_normed_input_);
+                fprintf(stderr, "  h_token_num=%zu, hidden_units_=%zu, int8_mode_=%d\n", h_token_num, hidden_units_, int8_mode_);
+                char test_buf[8];
+                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "  QKV test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                // Test gamma and decoder_input as well
+                test_err = cudaMemcpy(test_buf, gamma_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "  gamma test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                test_err = cudaMemcpy(test_buf, decoder_input, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "  decoder_input test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                test_err = cudaMemcpy(test_buf, decoder_normed_input_, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "  decoder_normed_input_ test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                fflush(stderr);
+            }
+
             PUSH_RANGE("pre-mha layernorm");
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
+                // Use opt_version=0 to disable optimized kernel that might have issues
                 invokeGeneralLayerNorm(decoder_normed_input_,
                                        decoder_input,
                                        layer_weight->pre_layernorm_weights.gamma,
@@ -747,12 +808,24 @@ void ParallelGptContextDecoder<T>::forward(
                                        hidden_units_,
                                        const_cast<float*>(layer_weight->self_attention_weights.query_weight.scale),
                                        nullptr,
-                                       /* dynamic_quant_ ? attention_query_dynamic_scale_ : nullptr, */
                                        int8_mode_,
-                                       stream_);
+                                       stream_,
+                                       0);  // opt_version=0 to use simple kernel
             }
 
             gpu_sync(stream_);
+
+            // Debug: check weight pointer AFTER layernorm
+            if (l == 0 && ite == 0) {
+                const T* qkv_ptr = layer_weight->self_attention_weights.query_weight.kernel;
+                fprintf(stderr, "[FT][ContextDecoder] AFTER pre-mha layernorm: QKV ptr=%p\n", (void*)qkv_ptr);
+                char test_buf[8];
+                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "[FT][ContextDecoder] AFTER pre-mha layernorm: QKV test err=%s\n",
+                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                fflush(stderr);
+            }
+
             POP_RANGE;
 
             const bool is_final = false;  // TODO(bhsueh) remove this flag
@@ -808,6 +881,17 @@ void ParallelGptContextDecoder<T>::forward(
                  Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units_}, self_attn_output_}},
                 {"key_cache", Tensor{MEMORY_GPU, data_type, self_k_cache_size, k_cache_ptr}},
                 {"value_cache", Tensor{MEMORY_GPU, data_type, self_v_cache_size, v_cache_ptr}}};
+
+            // Debug: check weight pointer before attention forward
+            if (l == 0 && ite == 0) {
+                const T* qkv_ptr = layer_weight->self_attention_weights.query_weight.kernel;
+                fprintf(stderr, "[FT][ContextDecoder] Before attention forward: QKV ptr=%p\n", (void*)qkv_ptr);
+                char test_buf[8];
+                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "[FT][ContextDecoder] QKV pointer test: err=%s\n",
+                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                fflush(stderr);
+            }
 
             self_attention_layer_->forward(
                 &self_attention_output_tensors, &self_attention_input_tensors, &layer_weight->self_attention_weights);

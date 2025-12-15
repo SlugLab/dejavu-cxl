@@ -898,6 +898,17 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                            is_return_context_cum_log_probs,
                            reload);
             sync_check_cuda_error();
+
+            // Debug: check weight pointer after allocateBuffer
+            {
+                const T* qkv_ptr = gpt_weights->decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
+                fprintf(stderr, "[FT][GPT] After allocateBuffer: QKV ptr=%p\n", (void*)qkv_ptr);
+                char test_buf[8];
+                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "[FT][GPT] After allocateBuffer: QKV test err=%s\n",
+                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                fflush(stderr);
+            }
         }
     }
 
@@ -1127,6 +1138,22 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                                      nullptr};
 
                 if (1) {
+                    // Debug: check QKV weight BEFORE embedding lookup
+                    {
+                        const T* qkv_ptr = gpt_weights->decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
+                        fprintf(stderr, "[FT][GPT] BEFORE embedding lookup: QKV ptr=%p\n", (void*)qkv_ptr);
+                        fprintf(stderr, "[FT][GPT] embedding_table=%p, pos_table=%p\n",
+                                (void*)gpt_weights->pre_decoder_embedding_table,
+                                (void*)gpt_weights->position_encoding_table);
+                        fprintf(stderr, "[FT][GPT] context_decoder_input_buf_=%p, hidden_units_=%zu\n",
+                                (void*)context_decoder_input_buf_, hidden_units_);
+                        char test_buf[8];
+                        cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                        fprintf(stderr, "[FT][GPT] BEFORE embedding: QKV test err=%s\n",
+                                test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                        fflush(stderr);
+                    }
+
                     invokeInputIdsEmbeddingLookupPosEncoding(context_decoder_input_buf_,
                                                              output_ids_buf_,
                                                              gpt_weights->pre_decoder_embedding_table,
@@ -1141,6 +1168,17 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                                              stream_);
 
                     sync_check_cuda_error();
+
+                    // Debug: check QKV weight AFTER embedding lookup
+                    {
+                        const T* qkv_ptr = gpt_weights->decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
+                        fprintf(stderr, "[FT][GPT] AFTER embedding lookup: QKV ptr=%p\n", (void*)qkv_ptr);
+                        char test_buf[8];
+                        cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+                        fprintf(stderr, "[FT][GPT] AFTER embedding: QKV test err=%s\n",
+                                test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
+                        fflush(stderr);
+                    }
                 }
                 sync_check_cuda_error();
                 POP_RANGE;

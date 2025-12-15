@@ -307,20 +307,39 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         // Debug output for cublasLt call
         int current_device = -1;
         cudaGetDevice(&current_device);
-        cudaPointerAttributes attrA, attrW;
-        cudaPointerGetAttributes(&attrA, A);
-        cudaPointerGetAttributes(&attrW, workSpace);
+        cudaPointerAttributes attrA, attrB, attrC;
+        cudaError_t errA = cudaPointerGetAttributes(&attrA, A);
+        cudaError_t errB = cudaPointerGetAttributes(&attrB, B);
+        cudaError_t errC = cudaPointerGetAttributes(&attrC, C);
 
-        fprintf(stderr, "[FT][GEMM] cublasLtMatmul: handle=%p stream=%p device=%d\n",
+        fprintf(stderr, "[FT][GEMM] cublasLtMatmul: handle=%p stream=%p current_device=%d\n",
                 (void*)cublaslt_handle_, (void*)stream_, current_device);
         fprintf(stderr, "[FT][GEMM]   transa=%c transb=%c m=%d n=%d k=%d lda=%d ldb=%d ldc=%d\n",
                 (transa == CUBLAS_OP_N ? 'N' : (transa == CUBLAS_OP_T ? 'T' : 'C')),
                 (transb == CUBLAS_OP_N ? 'N' : (transb == CUBLAS_OP_T ? 'T' : 'C')),
                 m, n, k, lda, ldb, ldc);
-        fprintf(stderr, "[FT][GEMM]   findAlgo=%d workspace=%p (dev=%d) size=%d\n",
-                findAlgo, workSpace, attrW.device, workspaceSize);
-        fprintf(stderr, "[FT][GEMM]   A=%p (type=%d,dev=%d) B=%p C=%p Atype=%d Btype=%d Ctype=%d compute=%d\n",
-                A, attrA.type, attrA.device, B, C, (int)Atype_, (int)Btype_, (int)Ctype_, (int)computeType);
+        fprintf(stderr, "[FT][GEMM]   A=%p (err=%d,type=%d,dev=%d) B=%p (err=%d,type=%d,dev=%d) C=%p (err=%d,type=%d,dev=%d)\n",
+                A, errA, attrA.type, attrA.device,
+                B, errB, attrB.type, attrB.device,
+                C, errC, attrC.type, attrC.device);
+        fprintf(stderr, "[FT][GEMM]   Atype=%d Btype=%d Ctype=%d compute=%d\n",
+                (int)Atype_, (int)Btype_, (int)Ctype_, (int)computeType);
+
+        // Verify all pointers are on the same device as current
+        if (attrA.device != current_device || attrB.device != current_device || attrC.device != current_device) {
+            fprintf(stderr, "[FT][GEMM] ERROR: Device mismatch! Current=%d, A.dev=%d, B.dev=%d, C.dev=%d\n",
+                    current_device, attrA.device, attrB.device, attrC.device);
+        }
+
+        // Try to verify A can be accessed by doing a small copy
+        if (errA == cudaSuccess && attrA.type == 2) {  // type 2 = cudaMemoryTypeDevice
+            char test_buf[8];
+            cudaError_t test_err = cudaMemcpy(test_buf, A, sizeof(test_buf), cudaMemcpyDeviceToHost);
+            if (test_err != cudaSuccess) {
+                fprintf(stderr, "[FT][GEMM] ERROR: Cannot read from A pointer! err=%s\n", cudaGetErrorString(test_err));
+                cudaGetLastError(); // Clear error
+            }
+        }
         fflush(stderr);
 
         // Check for NULL pointers in critical parameters
@@ -836,56 +855,58 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
             fflush(stderr);
         }
     } else {
-        // Mixed precision path - use cublasLt
-        cublasLtMatmulDesc_t   operationDesc = NULL;
-        cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
+        // Mixed precision path - use cublasGemmStridedBatchedEx instead of cublasLt
+        // cublasLt has issues with certain mixed precision strided batch configurations
+        if (dbg && *dbg && std::atoi(dbg) != 0) {
+            fprintf(stderr, "[FT][GEMM] StridedBatched using cublasGemmStridedBatchedEx (mixed precision): m=%d n=%d k=%d batch=%d\n",
+                    m, n, k, batch_count);
+            fflush(stderr);
+        }
 
-        // Determine compute type for cublasLt
-        cublasComputeType_t ltComputeType = (computeType == CUDA_R_16F) ? CUBLAS_COMPUTE_16F : CUBLAS_COMPUTE_32F;
-        cudaDataType_t scaleType = (computeType == CUDA_R_16F) ? CUDA_R_16F : CUDA_R_32F;
+        // Determine compute type - CUBLAS_COMPUTE_32F_FAST_16F for mixed precision with FP16 inputs
+        cublasComputeType_t gemm_compute = CUBLAS_COMPUTE_32F;
 
-        // Create matrix layouts with stride
-        cublasLtMatrixLayoutCreate(&Adesc, AType, transa == CUBLAS_OP_N ? m : k, transa == CUBLAS_OP_N ? k : m, lda);
-        cublasLtMatrixLayoutCreate(&Bdesc, BType, transb == CUBLAS_OP_N ? k : n, transb == CUBLAS_OP_N ? n : k, ldb);
-        cublasLtMatrixLayoutCreate(&Cdesc, CType, m, n, ldc);
+        status = cublasGemmStridedBatchedEx(cublas_handle_,
+                                            transa,
+                                            transb,
+                                            m, n, k,
+                                            &f_alpha,
+                                            A, AType, lda, strideA,
+                                            B, BType, ldb, strideB,
+                                            &f_beta,
+                                            C, CType, ldc, strideC,
+                                            batch_count,
+                                            gemm_compute,
+                                            CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 
-        // Set batch count and stride
-        cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count));
-        cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count));
-        cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count));
-        cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA));
-        cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB));
-        cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideC, sizeof(strideC));
+        if (dbg && *dbg && std::atoi(dbg) != 0) {
+            fprintf(stderr, "[FT][GEMM] cublasGemmStridedBatchedEx (mixed) returned status %d\n", (int)status);
+            fflush(stderr);
+        }
 
-        // Create operation descriptor
-        cublasLtMatmulDescCreate(&operationDesc, ltComputeType, scaleType);
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa));
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb));
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr, "[FT][GEMM] Mixed precision strided GEMM failed: status=%d, trying fallback...\n", (int)status);
+            fflush(stderr);
 
-        fprintf(stderr, "[FT][GEMM] StridedBatched using cublasLt (mixed precision): m=%d n=%d k=%d batch=%d compute=%d\n",
-                m, n, k, batch_count, (int)ltComputeType);
-        fflush(stderr);
+            // Fallback: try with CUBLAS_COMPUTE_32F_FAST_TF32
+            status = cublasGemmStridedBatchedEx(cublas_handle_,
+                                                transa,
+                                                transb,
+                                                m, n, k,
+                                                &f_alpha,
+                                                A, AType, lda, strideA,
+                                                B, BType, ldb, strideB,
+                                                &f_beta,
+                                                C, CType, ldc, strideC,
+                                                batch_count,
+                                                CUBLAS_COMPUTE_32F_FAST_TF32,
+                                                CUBLAS_GEMM_DEFAULT);
 
-        status = cublasLtMatmul(cublaslt_handle_,
-                                operationDesc,
-                                alpha,
-                                A, Adesc,
-                                B, Bdesc,
-                                beta,
-                                C, Cdesc,
-                                C, Cdesc,
-                                NULL,  // Auto-select algorithm
-                                NULL,  // No workspace
-                                0,
-                                stream_);
-
-        fprintf(stderr, "[FT][GEMM] cublasLt strided returned status %d\n", (int)status);
-        fflush(stderr);
-
-        cublasLtMatmulDescDestroy(operationDesc);
-        cublasLtMatrixLayoutDestroy(Adesc);
-        cublasLtMatrixLayoutDestroy(Bdesc);
-        cublasLtMatrixLayoutDestroy(Cdesc);
+            if (dbg && *dbg && std::atoi(dbg) != 0) {
+                fprintf(stderr, "[FT][GEMM] cublasGemmStridedBatchedEx (TF32 fallback) returned status %d\n", (int)status);
+                fflush(stderr);
+            }
+        }
     }
 
     check_cuda_error(status);

@@ -79,9 +79,13 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
 
     PUSH_RANGE("qkv_gemm");
 
+    // QKV output size: weights are already expanded for GQA during conversion
+    // So we always use 3 * local_hidden_units_ even for GQA models
+    const size_t qkv_output_size = 3 * local_hidden_units_;
+
 #ifdef SPARSITY_ENABLED
     const int m_padded   = 8 * div_up(m, 8);
-    bool      use_sparse = sparse_ && cublas_wrapper_->isUseSparse(1, 3 * local_hidden_units_, m_padded, hidden_units_);
+    bool      use_sparse = sparse_ && cublas_wrapper_->isUseSparse(1, qkv_output_size, m_padded, hidden_units_);
 #else
     constexpr bool use_sparse = false;
 #endif
@@ -90,7 +94,7 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
 #ifdef SPARSITY_ENABLED
         cublas_wrapper_->SpGemm(CUBLAS_OP_N,
                                 CUBLAS_OP_N,
-                                3 * local_hidden_units_,
+                                qkv_output_size,
                                 m_padded,
                                 hidden_units_,
                                 attention_weights->query_weight.sp_kernel,
@@ -107,14 +111,14 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
                                           attention_weights->query_weight.weight_only_quant_scale,
                                           qkv_buf_,
                                           m,
-                                          3 * local_hidden_units_,
+                                          qkv_output_size,
                                           hidden_units_,
                                           mixed_gemm_workspace_,
                                           mixed_gemm_ws_bytes_,
                                           stream_);
     }
     else if (int8_mode_ == 2) {
-        cublas_wrapper_->Int8Gemm(3 * local_hidden_units_,
+        cublas_wrapper_->Int8Gemm(qkv_output_size,
                                   m,
                                   hidden_units_,
                                   attention_weights->query_weight.int8_kernel,
@@ -122,22 +126,29 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
                                   input_tensors->at("input_query").getPtr<int8_t>(),
                                   hidden_units_,
                                   reinterpret_cast<int8_t*>(qkv_buf_),
-                                  3 * local_hidden_units_,
+                                  qkv_output_size,
                                   attention_weights->query_weight.scale_inter,
                                   true);
     }
     else {
+        fprintf(stderr, "[FT][ATTN] QKV GEMM: hidden_units_=%zu, qkv_output_size=%zu, local_head_num_=%zu, m=%d\n",
+                hidden_units_, qkv_output_size, local_head_num_, m);
+        fprintf(stderr, "[FT][ATTN]   weight_ptr=%p, input_ptr=%p, output_ptr=%p\n",
+                (void*)attention_weights->query_weight.kernel,
+                (void*)attention_input,
+                (void*)qkv_buf_);
+        fflush(stderr);
         cublas_wrapper_->Gemm(CUBLAS_OP_N,
                               CUBLAS_OP_N,
-                              3 * local_hidden_units_,  // n
+                              qkv_output_size,  // n
                               m,
                               hidden_units_,  // k
                               attention_weights->query_weight.kernel,
-                              3 * local_hidden_units_,  // n
+                              qkv_output_size,  // n
                               attention_input,
                               hidden_units_,  // k
                               qkv_buf_,
-                              3 * local_hidden_units_ ); // n
+                              qkv_output_size); // n
     }
 
     CUDACHECK(cudaStreamSynchronize(stream_)); //sync_check_cuda_error();
@@ -153,6 +164,33 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
         cudaMemsetAsync(
             q_buf_2_, 0, request_batch_size * request_seq_len * 3 * local_hidden_units_ * sizeof(T), stream_);
     }
+
+    // Check for errors after QKV GEMM
+    {
+        cudaError_t err = cudaStreamSynchronize(stream_);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[FT][ATTN] Error after QKV GEMM: %s\n", cudaGetErrorString(err));
+            fflush(stderr);
+            cudaGetLastError();  // Clear error
+        } else {
+            fprintf(stderr, "[FT][ATTN] QKV GEMM completed successfully\n");
+            fflush(stderr);
+        }
+    }
+
+    // Debug: print transpose parameters
+    fprintf(stderr, "[FT][ATTN] QKV transpose params: batch=%d seq=%d m=%d heads=%zu Dh=%zu rotary=%zu\n",
+            request_batch_size, request_seq_len, m, local_head_num_, size_per_head_, rotary_embedding_dim_);
+    fprintf(stderr, "[FT][ATTN]   qkv_buf_=%p q_buf_2_=%p k_buf_2_=%p v_buf_2_=%p\n",
+            (void*)qkv_buf_, (void*)q_buf_2_, (void*)k_buf_2_, (void*)v_buf_2_);
+    fprintf(stderr, "[FT][ATTN]   prefix_prompt: d_batch=%p d_lengths=%p max_len=%d\n",
+            (void*)d_prefix_prompt_batch, (void*)d_prefix_prompt_lengths, max_prompt_length);
+    fprintf(stderr, "[FT][ATTN]   bias=%p padding_offset=%p scale_out=%p\n",
+            (void*)attention_weights->query_weight.bias, (void*)padding_offset,
+            (void*)attention_weights->query_weight.scale_out);
+    fflush(stderr);
+
+    // Use standard transpose for MHA - GQA weights are already expanded during conversion
     invokeAddFusedQKVBiasTranspose(q_buf_2_,
                                    k_buf_2_,
                                    v_buf_2_,
@@ -170,7 +208,19 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
                                    attention_weights->query_weight.scale_out,
                                    int8_mode_,
                                    stream_);
-    CUDACHECK(cudaStreamSynchronize(stream_)); //sync_check_cuda_error();
+
+    // Check for errors after transpose
+    {
+        cudaError_t err = cudaStreamSynchronize(stream_);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[FT][ATTN] Error after QKV transpose: %s\n", cudaGetErrorString(err));
+            fflush(stderr);
+            cudaGetLastError();  // Clear error
+        } else {
+            fprintf(stderr, "[FT][ATTN] QKV transpose completed successfully\n");
+            fflush(stderr);
+        }
+    }
 
     const int max_seq_len = (int)(output_tensors->at("key_cache").shape[3]);  // max output seq length
     // Use batch major
@@ -423,6 +473,8 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t           max_batch
     hidden_units_(hidden_size > 0 ? hidden_size : head_num * size_per_head),
     local_head_num_(head_num),
     local_hidden_units_(local_head_num_ * size_per_head),
+    local_kv_head_num_(head_num),  // Default: same as Q heads (MHA)
+    local_kv_hidden_units_(local_kv_head_num_ * size_per_head),
     rotary_embedding_dim_(0),
     neox_rotary_style_(false),
     is_qk_buf_float_(is_qk_buf_float || int8_mode == 2),
@@ -454,6 +506,8 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t           max_batch
     hidden_units_(hidden_size > 0 ? hidden_size : head_num * size_per_head),
     local_head_num_(local_head_num),
     local_hidden_units_(local_head_num_ * size_per_head),
+    local_kv_head_num_(local_head_num),  // Default: same as Q heads (MHA)
+    local_kv_hidden_units_(local_kv_head_num_ * size_per_head),
     rotary_embedding_dim_(0),
     neox_rotary_style_(false),
     is_qk_buf_float_(is_qk_buf_float || int8_mode == 2),
@@ -489,6 +543,8 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t           max_batch
     hidden_units_(hidden_size > 0 ? hidden_size : head_num * size_per_head),
     local_head_num_(local_head_num),
     local_hidden_units_(local_head_num_ * size_per_head),
+    local_kv_head_num_(local_head_num),  // Default: same as Q heads (MHA)
+    local_kv_hidden_units_(local_kv_head_num_ * size_per_head),
     rotary_embedding_dim_(rotary_embedding_dim),
     neox_rotary_style_(neox_rotary_style),
     is_qk_buf_float_(is_qk_buf_float),
@@ -497,6 +553,47 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t           max_batch
     int8_mode_(int8_mode)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, size_per_head_, sm_, 1.0f));
+}
+
+// GQA constructor with separate kv_head_num
+template<typename T>
+GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t           max_batch_size,
+                                                      size_t           max_seq_len,
+                                                      size_t           head_num,
+                                                      size_t           size_per_head,
+                                                      size_t           local_head_num,
+                                                      size_t           local_kv_head_num,
+                                                      size_t           rotary_embedding_dim,
+                                                      bool             neox_rotary_style,
+                                                      cudaStream_t     stream,
+                                                      cublasMMWrapper* cublas_wrapper,
+                                                      IAllocator*      allocator,
+                                                      bool             is_free_buffer_after_forward,
+                                                      bool             is_qk_buf_float,
+                                                      bool             sparse,
+                                                      int              int8_mode,
+                                                      size_t           hidden_size):
+    BaseAttentionLayer<T>(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, sparse),
+    max_batch_size_(max_batch_size),
+    max_seq_len_(max_seq_len),
+    head_num_(head_num),
+    size_per_head_(size_per_head),
+    hidden_units_(hidden_size > 0 ? hidden_size : head_num * size_per_head),
+    local_head_num_(local_head_num),
+    local_hidden_units_(local_head_num_ * size_per_head),
+    local_kv_head_num_(local_kv_head_num),
+    local_kv_hidden_units_(local_kv_head_num_ * size_per_head),
+    rotary_embedding_dim_(rotary_embedding_dim),
+    neox_rotary_style_(neox_rotary_style),
+    is_qk_buf_float_(is_qk_buf_float),
+    weight_only_int8_fc_runner_(int8_mode == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
+    int8_fc_runner_(int8_mode == 2 ? std::make_shared<CutlassInt8GemmRunner<T>>() : nullptr),
+    int8_mode_(int8_mode)
+{
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    fprintf(stderr, "[FT][ATTN] GQA constructor: head_num=%zu, kv_head_num=%zu, hidden_units=%zu\n",
+            local_head_num_, local_kv_head_num_, hidden_units_);
     dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, size_per_head_, sm_, 1.0f));
 }
 
@@ -514,6 +611,8 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(GptContextAttentionLayer<T
     hidden_units_(attention_layer.hidden_units_),
     local_head_num_(attention_layer.local_head_num_),
     local_hidden_units_(attention_layer.local_hidden_units_),
+    local_kv_head_num_(attention_layer.local_kv_head_num_),
+    local_kv_hidden_units_(attention_layer.local_kv_hidden_units_),
     rotary_embedding_dim_(attention_layer.rotary_embedding_dim_),
     neox_rotary_style_(attention_layer.neox_rotary_style_),
     is_qk_buf_float_(attention_layer.is_qk_buf_float_),
@@ -543,6 +642,8 @@ void GptContextAttentionLayer<T>::allocateBuffer(size_t batch_size, size_t seq_l
     // const auto type_size = int8_mode_ == 2 ? sizeof(int8_t) : sizeof(T);
     // NOTE (perkzz): use sizeof(T) here for cutlass int8 kernels.
     const auto type_size = sizeof(T);
+
+    // QKV buffer: GQA weights are already expanded during conversion, so use 3 * local_hidden_units_
     qkv_buf_ = (T*)allocator_->reMalloc(qkv_buf_, type_size * 3 * batch_size * seq_len * local_hidden_units_, true);
     q_buf_2_ = (T*)allocator_->reMalloc(q_buf_2_, sizeof(T) * batch_size * seq_len * 3 * local_hidden_units_, true);
     k_buf_2_ = q_buf_2_ + batch_size * seq_len * local_hidden_units_;

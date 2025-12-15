@@ -224,4 +224,24 @@ void invokeMaskedSoftMaxWithRelPosBias(T*           qk_buf,
 template<typename T>
 void invokeTransposeAttentions(Tensor& attentions_out, const Tensor& attentions_in, cudaStream_t stream = 0);
 
+// GQA-aware QKV transpose with KV head repetition
+// Input QKV: [batch_size * seq_len, head_num * Dh + 2 * kv_head_num * Dh]
+// Output Q: [batch_size, head_num, seq_len, Dh]
+// Output K: [batch_size, head_num, seq_len, Dh] (repeated from kv_head_num)
+// Output V: [batch_size, head_num, seq_len, Dh] (repeated from kv_head_num)
+template<typename T>
+void invokeAddFusedQKVBiasTransposeGQA(T*           q_buf,
+                                       T*           k_buf,
+                                       T*           v_buf,
+                                       T*           QKV,
+                                       const T*     qkv_bias,
+                                       const int*   padding_offset,
+                                       const int    batch_size,
+                                       const int    seq_len,
+                                       const int    token_num,
+                                       const int    head_num,
+                                       const int    kv_head_num,
+                                       const int    size_per_head,
+                                       cudaStream_t stream);
+
 }  // namespace fastertransformer
