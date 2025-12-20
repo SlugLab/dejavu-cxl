@@ -73,6 +73,17 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
     POP_RANGE;
     //sync_check_cuda_error(); TODO: CHECK THIS!
 
+    // Debug: print buffer sizes and critical dimensions
+    fprintf(stderr, "[FT][ATTN] Buffer allocation complete:\n");
+    fprintf(stderr, "  batch=%d, seq=%d, max_prompt=%d, total_seq=%d\n",
+            request_batch_size, request_seq_len, max_prompt_length, request_seq_len + max_prompt_length);
+    fprintf(stderr, "  hidden_units_=%zu, local_hidden_units_=%zu, local_head_num_=%zu, size_per_head_=%zu\n",
+            hidden_units_, local_hidden_units_, local_head_num_, size_per_head_);
+    fprintf(stderr, "  qkv_buf_=%p, q_buf_2_=%p, k_buf_2_=%p, v_buf_2_=%p\n",
+            (void*)qkv_buf_, (void*)q_buf_2_, (void*)k_buf_2_, (void*)v_buf_2_);
+    fprintf(stderr, "  Expected QKV GEMM output: m * 3 * local_hidden_units_ elements\n");
+    fflush(stderr);
+
     const bool is_final = input_tensors->at("is_final_layer").getVal<bool>();
 
     const int m = input_tensors->at("input_query").shape[0];
@@ -297,6 +308,30 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
                 POP_RANGE;
             }
             else {
+                // Debug: print strided GEMM parameters before call
+                fprintf(stderr, "[FT][ATTN] Before FP16 Q*K^T strided GEMM:\n");
+                fprintf(stderr, "  attention_seq_len_1 (q_len)=%d, attention_seq_len_2 (kv_len)=%d\n",
+                        attention_seq_len_1, attention_seq_len_2);
+                fprintf(stderr, "  size_per_head_=%zu, local_head_num_=%zu\n", size_per_head_, local_head_num_);
+                fprintf(stderr, "  batch_count=%d (batch=%d * heads=%zu)\n",
+                        request_batch_size * (int)local_head_num_, request_batch_size, local_head_num_);
+                fprintf(stderr, "  k_buf_2_=%p, q_buf_2_=%p, qk_buf_=%p\n",
+                        (void*)k_buf_2_, (void*)q_buf_2_, (void*)qk_buf_);
+                fprintf(stderr, "  strideA=%d, strideB=%d, strideC=%d\n",
+                        attention_seq_len_2 * (int)size_per_head_,
+                        attention_seq_len_1 * (int)size_per_head_,
+                        attention_seq_len_2 * attention_seq_len_1);
+                fflush(stderr);
+
+                // Sync and check for any pending errors before GEMM
+                cudaError_t pre_gemm_err = cudaStreamSynchronize(stream_);
+                if (pre_gemm_err != cudaSuccess) {
+                    fprintf(stderr, "[FT][ATTN] ERROR: Pre-strided-GEMM sync failed: %s\n",
+                            cudaGetErrorString(pre_gemm_err));
+                    cudaGetLastError();  // Clear the error
+                }
+                fflush(stderr);
+
                 PUSH_RANGE("Q*K batch gemm");
                 cublas_wrapper_->stridedBatchedGemm(CUBLAS_OP_T,
                                                     CUBLAS_OP_N,

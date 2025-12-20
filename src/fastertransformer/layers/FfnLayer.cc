@@ -92,6 +92,12 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     if (use_moe) {
         PUSH_RANGE("FFN moe");
         FT_CHECK(ia3_tasks == nullptr);
+        // Debug: print MoE gating parameters
+        fprintf(stderr, "[FT][FFN] MoE gating GEMM: expert_num=%zu m=%d hidden_units=%zu\n",
+                expert_num_, m, hidden_units_);
+        fprintf(stderr, "  gating_weight=%p input=%p moe_gates_buf_=%p\n",
+                (void*)ffn_weights->gating_weight.kernel, (void*)input_tensor, (void*)moe_gates_buf_);
+        fflush(stderr);
         cublas_wrapper_->Gemm(CUBLAS_OP_N,
                               CUBLAS_OP_N,
                               expert_num_,
@@ -103,8 +109,24 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               hidden_units_,
                               moe_gates_buf_,
                               expert_num_);
+        // Debug: check after gating GEMM
+        {
+            cudaError_t err = cudaStreamSynchronize(stream_);
+            fprintf(stderr, "[FT][FFN] After gating GEMM: err=%s\n",
+                    err == cudaSuccess ? "OK" : cudaGetErrorString(err));
+            fflush(stderr);
+        }
 
         if (int8_mode_ == 0) {
+            // Debug: print MoE FC parameters
+            fprintf(stderr, "[FT][FFN] MoE FC: m=%d hidden=%zu inter=%zu experts=%zu moe_k=%zu\n",
+                    m, hidden_units_, inter_size_, expert_num_, moe_k);
+            fprintf(stderr, "  intermediate_weight=%p output_weight=%p\n",
+                    (void*)ffn_weights->intermediate_weight.kernel,
+                    (void*)ffn_weights->output_weight.kernel);
+            fprintf(stderr, "  moe_fc_workspace_=%p output_tensor=%p\n",
+                    (void*)moe_fc_workspace_, (void*)output_tensor);
+            fflush(stderr);
             moe_fc_runner_->run_moe_fc(input_tensor,
                                        moe_gates_buf_,
                                        ffn_weights->intermediate_weight.kernel,
@@ -124,6 +146,13 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                        permuted_rows,
                                        permuted_experts,
                                        stream_);
+            // Debug: check after MoE FC
+            {
+                cudaError_t err = cudaStreamSynchronize(stream_);
+                fprintf(stderr, "[FT][FFN] After MoE FC: err=%s\n",
+                        err == cudaSuccess ? "OK" : cudaGetErrorString(err));
+                fflush(stderr);
+            }
         }
         else if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(moe_int8_weight_only_fc_runner_.get() != NULL,
@@ -392,13 +421,14 @@ FfnLayer<T>::FfnLayer(size_t           max_batch_size,
                       bool             is_free_buffer_after_forward,
                       bool             sparse,
                       int              int8_mode,
-                      bool             use_gated_activation):
+                      bool             use_gated_activation,
+                      size_t           hidden_size):
     BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, nullptr, sparse),
     max_token_num_(max_batch_size * max_seq_len),
     head_num_(head_num),
     size_per_head_(size_per_head),
     expert_num_(expert_num),
-    hidden_units_(head_num * size_per_head),
+    hidden_units_(hidden_size > 0 ? hidden_size : head_num * size_per_head),
     max_inter_size_(inter_size),
     inter_size_(inter_size),
     int8_mode_(int8_mode),
@@ -603,7 +633,8 @@ GeluFfnLayer<T>::GeluFfnLayer(size_t           max_batch_size,
                               bool             is_free_buffer_after_forward,
                               bool             sparse,
                               int              int8_mode,
-                              bool             use_gated_activation):
+                              bool             use_gated_activation,
+                              size_t           hidden_size):
     FfnLayer<T>(max_batch_size,
                 max_seq_len,
                 head_num,
@@ -616,7 +647,8 @@ GeluFfnLayer<T>::GeluFfnLayer(size_t           max_batch_size,
                 is_free_buffer_after_forward,
                 sparse,
                 int8_mode,
-                use_gated_activation)
+                use_gated_activation,
+                hidden_size)
 {
 }
 
@@ -644,7 +676,8 @@ ReluFfnLayer<T>::ReluFfnLayer(size_t           max_batch_size,
                               bool             is_free_buffer_after_forward,
                               bool             sparse,
                               int              int8_mode,
-                              bool             use_gated_activation):
+                              bool             use_gated_activation,
+                              size_t           hidden_size):
     FfnLayer<T>(max_batch_size,
                 max_seq_len,
                 head_num,
@@ -657,7 +690,8 @@ ReluFfnLayer<T>::ReluFfnLayer(size_t           max_batch_size,
                 is_free_buffer_after_forward,
                 sparse,
                 int8_mode,
-                use_gated_activation)
+                use_gated_activation,
+                hidden_size)
 {
 }
 
@@ -684,7 +718,8 @@ SiluFfnLayer<T>::SiluFfnLayer(size_t           max_batch_size,
                               IAllocator*      allocator,
                               bool             is_free_buffer_after_forward,
                               bool             sparse,
-                              bool             use_gated_activation):
+                              bool             use_gated_activation,
+                              size_t           hidden_size):
     FfnLayer<T>(max_batch_size,
                 max_seq_len,
                 head_num,
@@ -697,7 +732,8 @@ SiluFfnLayer<T>::SiluFfnLayer(size_t           max_batch_size,
                 is_free_buffer_after_forward,
                 sparse,
                 0,
-                use_gated_activation)
+                use_gated_activation,
+                hidden_size)
 {
 }
 

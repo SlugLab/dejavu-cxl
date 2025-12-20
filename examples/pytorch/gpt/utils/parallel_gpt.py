@@ -29,6 +29,8 @@ class ParallelGPT(GPT):
             del self.model
             self.build_model = False
 
+        print(f"[ParallelGPT.cuda] Creating ParallelGptOp with hidden_size={self.hidden_size}")
+        print(f"[ParallelGPT.cuda] head_num={self.head_num}, size_per_head={self.size_per_head}, head_num*size_per_head={self.head_num * self.size_per_head}")
         self.model = torch.classes.FasterTransformer.ParallelGptOp(
             self.head_num, self.size_per_head, self.inter_size,
             self.layer_num,
@@ -50,5 +52,10 @@ class ParallelGPT(GPT):
             self.weights.w,
             self.weights.int8_w,
             self.weights.scale,
-            self.shared_contexts_ratio)
+            self.shared_contexts_ratio,
+            0,  # prompt_world_size (default for single GPU)
+            0,  # token_world_size (default)
+            0,  # torch_rank (default)
+            False,  # is_restart
+            self.hidden_size)  # hidden_size for GQA models where hidden != head_num * size_per_head
         self.build_model = True

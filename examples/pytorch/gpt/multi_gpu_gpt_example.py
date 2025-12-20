@@ -171,6 +171,14 @@ def main():
                     key, prev_val, args.__dict__[key]))
             else:
                 print('Not loading {} from config.ini'.format(key))
+        # Read hidden_size if present (for models like Qwen3 where hidden_size != head_num * size_per_head)
+        if 'hidden_size' in ckpt_config['gpt'].keys():
+            hidden_size = ckpt_config.getint('gpt', 'hidden_size')
+            print(f'Loading hidden_size from config.ini: {hidden_size}')
+        else:
+            hidden_size = 0  # Will be computed as head_num * size_per_head
+    else:
+        hidden_size = 0  # Default if config.ini doesn't exist
     if 'structure' in ckpt_config.keys():
         gpt_with_moe = ckpt_config.getboolean('structure', 'gpt_with_moe')
         expert_num = ckpt_config.getint('structure', 'expert_num')
@@ -179,14 +187,12 @@ def main():
             moe_layer_index = []
         else:
             moe_layer_index = [int(n) for n in moe_layer_index_str[1:-1].replace(' ', '').split(',')]
-        moe_k = 1
+        moe_k = ckpt_config.getint('structure', 'moe_k', fallback=1)
     else:
         gpt_with_moe = False
         expert_num = 0
         moe_layer_index = []
         moe_k = 0
-    
-    gpt_with_moe = False
     layer_num = args.layer_num
     output_len = args.output_len
     head_num = args.head_num
@@ -286,7 +292,8 @@ def main():
                           layernorm_eps=layernorm_eps,
                           layernorm_type=layernorm_type,
                           activation_type=activation_type,
-                          has_post_decoder_layernorm=has_post_decoder_layernorm)
+                          has_post_decoder_layernorm=has_post_decoder_layernorm,
+                          hidden_size=hidden_size)
         else:
             gpt = ParallelGPT(head_num, size_per_head, vocab_size, start_id, end_id,
                           layer_num, max_seq_len, tensor_para_size, pipeline_para_size,
@@ -296,7 +303,8 @@ def main():
                           gpt_with_moe=gpt_with_moe,
                           expert_num=expert_num,
                           moe_k=moe_k,
-                          moe_layer_index=moe_layer_index)
+                          moe_layer_index=moe_layer_index,
+                          hidden_size=hidden_size)
         print("Load Model")    
         if not gpt.load(ckpt_path=args.ckpt_path):
             print("[WARNING] Checkpoint file not found. Model loading is skipped.")

@@ -21,6 +21,7 @@
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/TensorParallelGeluFfnLayer.h"
 #include "src/fastertransformer/layers/TensorParallelReluFfnLayer.h"
+#include "src/fastertransformer/layers/TensorParallelSiluFfnLayer.h"
 #include "src/fastertransformer/layers/attention_layers/TensorParallelDecoderSelfAttentionLayer.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
 #include "src/fastertransformer/utils/Tensor.h"

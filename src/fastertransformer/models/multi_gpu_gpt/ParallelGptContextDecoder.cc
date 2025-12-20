@@ -21,6 +21,7 @@
 #include "src/fastertransformer/kernels/decoding_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/utils/nvtx_utils.h"
+#include <type_traits>
 
 namespace fastertransformer {
 
@@ -125,6 +126,28 @@ void ParallelGptContextDecoder<T>::initialize()
                                                        use_gated_activation,
                                                        custom_all_reduce_comm_,
                                                        enable_custom_all_reduce_);
+    }
+    else if (activation_type_ == ActivationType::Silu || activation_type_ == ActivationType::SiGLU) {
+        ffn_layer_ = new TensorParallelSiluFfnLayer<T>(max_batch_size_,
+                                                       max_seq_len_,
+                                                       head_num_,
+                                                       size_per_head_,
+                                                       expert_num_,  // expert_num
+                                                       max_inter_size,
+                                                       tensor_para_,
+                                                       stream_,
+                                                       cublas_wrapper_,
+                                                       allocator_,
+                                                       true,  // do_all_reduce
+                                                       is_free_buffer_after_forward_,
+                                                       sparse_,
+                                                       use_gated_activation,
+                                                       custom_all_reduce_comm_,
+                                                       enable_custom_all_reduce_,
+                                                       hidden_units_);
+    }
+    else {
+        FT_CHECK_WITH_INFO(false, fmtstr("Unsupported activation type: %d", (int)activation_type_));
     }
     thread_done_ = false;
 }
@@ -316,7 +339,9 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(size_t               max
     tensor_para_(tensor_para),
     pipeline_para_(pipeline_para),
     cache_stream_para_(cache_stream_para),
-    is_qk_buf_float_(is_qk_buf_float),
+    // For FP16 models, disable is_qk_buf_float since mixed precision strided GEMM
+    // is not supported on some GPU architectures (e.g., sm_90/sm_120)
+    is_qk_buf_float_(std::is_same<T, half>::value ? false : is_qk_buf_float),
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce),
     attention_type_(attention_type),
@@ -355,7 +380,9 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(ParallelGptContextDecode
     hidden_units_(decoder.hidden_units_),
     tensor_para_(decoder.tensor_para_),
     pipeline_para_(decoder.pipeline_para_),
-    is_qk_buf_float_(decoder.is_qk_buf_float_),
+    // For FP16 models, disable is_qk_buf_float since mixed precision strided GEMM
+    // is not supported on some GPU architectures (e.g., sm_90/sm_120)
+    is_qk_buf_float_(std::is_same<T, half>::value ? false : decoder.is_qk_buf_float_),
     custom_all_reduce_comm_(decoder.custom_all_reduce_comm_),
     enable_custom_all_reduce_(decoder.enable_custom_all_reduce_),
     attention_type_(decoder.attention_type_),
@@ -950,6 +977,21 @@ void ParallelGptContextDecoder<T>::forward(
             }
 
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
+                // Debug: print pointers before post-attention layernorm
+                if (l == 0 && ite == 0) {
+                    fprintf(stderr, "[FT][ContextDecoder] BEFORE post-attn layernorm:\n");
+                    fprintf(stderr, "  self_attn_output_=%p, normed_self_attn_output_=%p\n",
+                            (void*)self_attn_output_, (void*)normed_self_attn_output_);
+                    fprintf(stderr, "  decoder_input=%p\n", (void*)decoder_input);
+                    fprintf(stderr, "  self_attn_layernorm gamma=%p, beta=%p\n",
+                            (void*)layer_weight->self_attn_layernorm_weights.gamma,
+                            (void*)layer_weight->self_attn_layernorm_weights.beta);
+                    fprintf(stderr, "  attn_output_bias=%p\n",
+                            (void*)layer_weight->self_attention_weights.attention_output_weight.bias);
+                    fprintf(stderr, "  h_token_num=%zu, hidden_units_=%zu\n", h_token_num, hidden_units_);
+                    fflush(stderr);
+                }
+                // Use opt_version=0 to handle null beta (RMSNorm) properly
                 invokeGeneralAddBiasResidualPreLayerNorm(
                     has_adapters_ ? after_adapter_attn_output_ : self_attn_output_,
                     normed_self_attn_output_,
@@ -968,7 +1010,15 @@ void ParallelGptContextDecoder<T>::forward(
                     const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
                     nullptr,  // NOTE (perkzz): dynamic_quant_ ? ffn_intermediate_dynamic_scale_ : nullptr,
                     int8_mode_,
-                    stream_);
+                    stream_,
+                    0);  // opt_version=0 for null beta support
+                // Debug: check for errors after post-attention layernorm
+                if (l == 0 && ite == 0) {
+                    cudaError_t err = cudaStreamSynchronize(stream_);
+                    fprintf(stderr, "[FT][ContextDecoder] AFTER post-attn layernorm: err=%s\n",
+                            err == cudaSuccess ? "OK" : cudaGetErrorString(err));
+                    fflush(stderr);
+                }
             }
             else if (layernorm_type_ == LayerNormType::post_layernorm) {
                 invokeAddBiasResidualLayerNorm(after_adapter_attn_output_,
@@ -1019,8 +1069,51 @@ void ParallelGptContextDecoder<T>::forward(
                     Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k_}, expert_for_source_row_});
             }
 
+            // Debug: print before FFN/MoE layer
+            if (l == 0 && ite == 0) {
+                fprintf(stderr, "[FT][ContextDecoder] BEFORE FFN layer: use_moe=%d moe_k_=%zu\n", use_moe, moe_k_);
+                fprintf(stderr, "  ffn_input ptr=%p\n",
+                        (void*)(layernorm_type_ == LayerNormType::pre_layernorm ? normed_self_attn_output_ : after_adapter_attn_output_));
+                fprintf(stderr, "  inter_size_=%zu, tensor_para_.world_size_=%d\n", inter_size_, tensor_para_.world_size_);
+                if (use_moe) {
+                    fprintf(stderr, "  fc2_result_=%p, expert_scales_=%p\n", (void*)fc2_result_, (void*)expert_scales_);
+                    fprintf(stderr, "  expanded_source_row_to_expanded_dest_row_=%p\n", (void*)expanded_source_row_to_expanded_dest_row_);
+                    fprintf(stderr, "  expert_for_source_row_=%p\n", (void*)expert_for_source_row_);
+                }
+                fprintf(stderr, "  ffn_weights.gate=%p\n", (void*)layer_weight->ffn_weights.gating_weight.kernel);
+                fprintf(stderr, "  ffn_weights.intermediate=%p\n", (void*)layer_weight->ffn_weights.intermediate_weight.kernel);
+                fprintf(stderr, "  ffn_weights.output=%p\n", (void*)layer_weight->ffn_weights.output_weight.kernel);
+                fflush(stderr);
+            }
+            // Debug: about to call resetInterSize
+            if (l == 0 && ite == 0) {
+                fprintf(stderr, "[FT][ContextDecoder] ffn_layer_=%p inter_size_=%zu\n", (void*)ffn_layer_, inter_size_);
+                fprintf(stderr, "[FT][ContextDecoder] Calling resetInterSize(%zu)\n", inter_size_ / tensor_para_.world_size_);
+                fflush(stderr);
+            }
+            if (ffn_layer_ == nullptr) {
+                fprintf(stderr, "[FT][ContextDecoder] ERROR: ffn_layer_ is NULL!\n");
+                fflush(stderr);
+            }
             ffn_layer_->resetInterSize(inter_size_ / tensor_para_.world_size_);
+            // Debug: after resetInterSize
+            if (l == 0 && ite == 0) {
+                fprintf(stderr, "[FT][ContextDecoder] After resetInterSize\n");
+                fflush(stderr);
+            }
+            // Debug: about to call forward
+            if (l == 0 && ite == 0) {
+                fprintf(stderr, "[FT][ContextDecoder] Calling ffn_layer_->forward()\n");
+                fflush(stderr);
+            }
             ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
+            // Debug: check after FFN layer
+            if (l == 0 && ite == 0) {
+                cudaError_t err = cudaStreamSynchronize(stream_);
+                fprintf(stderr, "[FT][ContextDecoder] AFTER FFN layer: err=%s\n",
+                        err == cudaSuccess ? "OK" : cudaGetErrorString(err));
+                fflush(stderr);
+            }
 
             // the adapter after ffn (only pre layernorm currently)
             PUSH_RANGE("post ffn");

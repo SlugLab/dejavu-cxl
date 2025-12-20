@@ -79,6 +79,8 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
     };
     printf("[FT][ParallelGptOp] ctor: weights=%zu int8_weights=%zu scales=%zu dtype=%s (%d)\n",
            weights.size(), int8_weights.size(), scale.size(), st_to_str(st_), (int)st_);
+    printf("[FT][ParallelGptOp] hidden_size=%ld, head_num=%ld, size_per_head=%ld, head_num*size_per_head=%ld\n",
+           (long)hidden_size, (long)head_num, (long)size_per_head, (long)(head_num * size_per_head));
     if (!weights.empty()) {
         const int show = std::min<size_t>(6, weights.size());
         for (int i = 0; i < show; ++i) {

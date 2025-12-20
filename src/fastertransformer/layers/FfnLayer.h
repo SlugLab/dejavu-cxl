@@ -111,7 +111,8 @@ public:
              bool             is_free_buffer_after_forward,
              bool             sparse               = false,
              int              int8_mode            = 0,
-             bool             use_gated_activation = false);
+             bool             use_gated_activation = false,
+             size_t           hidden_size          = 0);  // 0 = use head_num * size_per_head
 
     FfnLayer(FfnLayer<T> const& ffn_layer);
 
@@ -143,7 +144,8 @@ public:
                  bool             is_free_buffer_after_forward,
                  bool             sparse               = false,
                  int              int8_mode            = 0,
-                 bool             use_gated_activation = false);
+                 bool             use_gated_activation = false,
+                 size_t           hidden_size          = 0);
 
     GeluFfnLayer(GeluFfnLayer<T> const& ffn_layer);
 
@@ -177,7 +179,8 @@ public:
                  bool             is_free_buffer_after_forward,
                  bool             sparse               = false,
                  int              int8_mode            = 0,
-                 bool             use_gated_activation = false);
+                 bool             use_gated_activation = false,
+                 size_t           hidden_size          = 0);
 
     ReluFfnLayer(ReluFfnLayer<T> const& ffn_layer);
 
@@ -210,7 +213,8 @@ public:
                  IAllocator*      allocator,
                  bool             is_free_buffer_after_forward,
                  bool             sparse               = false,
-                 bool             use_gated_activation = false);
+                 bool             use_gated_activation = false,
+                 size_t           hidden_size          = 0);
 
     SiluFfnLayer(SiluFfnLayer<T> const& ffn_layer);
 

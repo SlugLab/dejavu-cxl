@@ -1284,7 +1284,9 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T* q_buf,
         else {
             val = ldg(&QKV[index]);
         }
-        val = val + ldg(&qkv_bias[bias_id]);
+        if (qkv_bias != nullptr) {
+            val = val + ldg(&qkv_bias[bias_id]);
+        }
 
         if (int8_mode == 2) {
             // TODO(mseznec): add support for int8 BMM with FusedAtt
@@ -1408,20 +1410,20 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int src_v_idx = token_idx * 3 * n + hidden_idx + 2 * n;
 
     Vec_t q, k, v;
-    Vec_t q_bias, k_bias, v_bias;
     if (!is_masked) {
         q = *reinterpret_cast<const Vec_t*>(&QKV[src_q_idx]);
         k = *reinterpret_cast<const Vec_t*>(&QKV[src_k_idx]);
         v = *reinterpret_cast<const Vec_t*>(&QKV[src_v_idx]);
 
-        q_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
-        k_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
-        v_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + 2 * n]);
+        if (qkv_bias != nullptr) {
+            Vec_t q_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx]);
+            Vec_t k_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + n]);
+            Vec_t v_bias = *reinterpret_cast<const Vec_t*>(&qkv_bias[hidden_idx + 2 * n]);
+            q = mmha::add(q, q_bias);
+            k = mmha::add(k, k_bias);
+            v = mmha::add(v, v_bias);
+        }
     }
-
-    q = mmha::add(q, q_bias);
-    k = mmha::add(k, k_bias);
-    v = mmha::add(v, v_bias);
 
     if (!neox_rotary_style) {
         mmha::apply_rotary_embedding(q, k, tidx, rotary_embedding_dim, dst_kv_seq_idx);

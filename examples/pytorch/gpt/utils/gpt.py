@@ -468,10 +468,13 @@ class GPT(nn.Module):
                  use_attention_linear_bias: bool = False,
                  int8_mode: int = 0,
                  weights_data_type: typing.Union[str, np.dtype] = np.float32,
-                 shared_contexts_ratio: float = 1.0):
+                 shared_contexts_ratio: float = 1.0,
+                 hidden_size: int = 0):
         super().__init__()
         self.head_num = head_num
         self.size_per_head = size_per_head
+        # hidden_size can differ from head_num * size_per_head for models like Qwen3
+        self.hidden_size = hidden_size if hidden_size > 0 else head_num * size_per_head
         self.vocab_size = vocab_size
         self.start_id = start_id
         self.end_id = end_id
