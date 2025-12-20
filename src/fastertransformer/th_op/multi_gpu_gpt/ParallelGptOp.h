@@ -191,8 +191,13 @@ public:
             if (i == 0) {
                 const T* qkv_ptr = gpt_weights_.decoder_layer_weights[i]->self_attention_weights.query_weight.kernel;
                 int64_t tensor_numel = weights_[i + 2 * layer_num_].numel();
-                fprintf(stderr, "[FT][CTOR] Layer 0 QKV weight: ptr=%p numel=%ld index=%d\n",
-                        (void*)qkv_ptr, (long)tensor_numel, i + 2 * (int)layer_num_);
+                // Expected: 12288 * 2048 = 25,165,824 elements for QKV
+                int64_t expected_numel = 3 * head_num_ * size_per_head_ * (hidden_size > 0 ? hidden_size : head_num_ * size_per_head_);
+                fprintf(stderr, "[FT][CTOR] Layer 0 QKV weight: ptr=%p numel=%ld expected=%ld index=%d\n",
+                        (void*)qkv_ptr, (long)tensor_numel, (long)expected_numel, i + 2 * (int)layer_num_);
+                if (tensor_numel != expected_numel) {
+                    fprintf(stderr, "[FT][CTOR] ERROR: QKV weight size mismatch! File may be wrong size.\n");
+                }
                 // Test if pointer is valid now
                 char test_buf[8];
                 cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);

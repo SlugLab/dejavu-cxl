@@ -1317,6 +1317,12 @@ template<typename T>
 void ParallelGptDVFT<T>::monitor_nccl()
 {
 #if defined(BUILD_MULTI_GPU) && defined(NCCL_VERSION_CODE) && (NCCL_VERSION_CODE >= 20400)
+    // Skip NCCL monitoring in single-GPU mode
+    if (pipeline_para_.world_size_ <= 1 && tensor_para_.world_size_ <= 1) {
+        printf("NCCL monitor thread skipped (single-GPU mode)\n");
+        return;
+    }
+
     printf("HELLO from NCCL monitor thread!\n");
     CUDACHECK(cudaSetDevice(cache_stream_para_.rank_ % num_devices_));
 
@@ -1331,7 +1337,10 @@ void ParallelGptDVFT<T>::monitor_nccl()
             controller_mtx_.unlock();
 
             ncclResult_t error = ncclSuccess;
-            NCCLCHECK(ncclCommGetAsyncError(pipeline_para_.nccl_comm_, &error));
+            // Only check NCCL errors if communicator is valid
+            if (pipeline_para_.nccl_comm_ != nullptr) {
+                NCCLCHECK(ncclCommGetAsyncError(pipeline_para_.nccl_comm_, &error));
+            }
             printf("----------- RANK %d, RESET IS %d\n", cache_stream_para_.rank_, reset);
             if (reset) {
                 reset_       = true;

@@ -148,7 +148,7 @@ void invokeGeneralLayerNorm(T*           out,
                             int          opt_version = 2)
 {
     invokeGeneralLayerNorm(
-        out, input, gamma, beta, layernorm_eps, m, n, scale, (float*)nullptr, int8_mode, stream, opt_version = 2);
+        out, input, gamma, beta, layernorm_eps, m, n, scale, (float*)nullptr, int8_mode, stream, opt_version);
 }
 
 template<typename T>

@@ -65,6 +65,13 @@ namespace fastertransformer
     {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 #ifdef BUILD_MULTI_GPU
+        // If no valid NCCL communicator or single-GPU mode, just copy data
+        if (nccl_param.nccl_comm_ == nullptr || nccl_param.world_size_ <= 1) {
+            if (send_buf != recv_buf) {
+                cudaMemcpyAsync(recv_buf, send_buf, data_size * sizeof(T), cudaMemcpyDeviceToDevice, stream);
+            }
+            return;
+        }
         ncclDataType_t nccl_data_type = getNcclDataType<T>();
         NCCLCHECK(ncclGroupStart());
         NCCLCHECK(ncclAllReduce(
@@ -80,6 +87,13 @@ namespace fastertransformer
     {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 #ifdef BUILD_MULTI_GPU
+        // If no valid NCCL communicator or single-GPU mode, just copy data
+        if (nccl_param.nccl_comm_ == nullptr || nccl_param.world_size_ <= 1) {
+            if (send_buf + rank * data_size != recv_buf) {
+                cudaMemcpyAsync(recv_buf, send_buf + rank * data_size, data_size * sizeof(T), cudaMemcpyDeviceToDevice, stream);
+            }
+            return;
+        }
         ncclDataType_t nccl_data_type = getNcclDataType<T>();
         NCCLCHECK(ncclGroupStart());
         NCCLCHECK(
@@ -94,6 +108,10 @@ namespace fastertransformer
     {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 #ifdef BUILD_MULTI_GPU
+        // Skip send if no valid NCCL communicator or single-GPU mode
+        if (nccl_param.nccl_comm_ == nullptr || nccl_param.world_size_ <= 1) {
+            return;
+        }
         ncclDataType_t nccl_data_type = getNcclDataType<T>();
         NCCLCHECK(ncclSend(send_buf, data_size, nccl_data_type, peer, nccl_param.nccl_comm_, stream));
 #endif
@@ -120,6 +138,10 @@ namespace fastertransformer
     {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 #ifdef BUILD_MULTI_GPU
+        // Skip recv if no valid NCCL communicator or single-GPU mode
+        if (nccl_param.nccl_comm_ == nullptr || nccl_param.world_size_ <= 1) {
+            return;
+        }
         ncclDataType_t nccl_data_type = getNcclDataType<T>();
         NCCLCHECK(ncclRecv(recv_buf, data_size, nccl_data_type, peer, nccl_param.nccl_comm_, stream));
 #endif
@@ -145,6 +167,10 @@ namespace fastertransformer
     {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 #ifdef BUILD_MULTI_GPU
+        // Skip broadcast if no valid NCCL communicator or single-GPU mode (data already in place)
+        if (nccl_param.nccl_comm_ == nullptr || nccl_param.world_size_ <= 1) {
+            return;
+        }
         ncclDataType_t nccl_data_type = getNcclDataType<T>();
         NCCLCHECK(ncclBcast(buff, data_size, nccl_data_type, root, nccl_param.nccl_comm_, stream));
 #endif
@@ -259,22 +285,26 @@ namespace fastertransformer
                 std::string error_msg = "CUDA Error : cudaStreamQuery returned " + std::to_string(cudaErr);
                 throw std::runtime_error(error_msg);
             }
-            if (tensor_para.world_size_ > 1)
+            if (tensor_para.world_size_ > 1 && tensor_comm != nullptr)
             {
                 tensor_ncclErr = ncclCommGetAsyncError(tensor_comm, &tensor_ncclAsyncErr);
             }
-            if (pipeline_para.world_size_ > 1)
+            if (pipeline_para.world_size_ > 1 && pipeline_comm != nullptr)
             {
                 pipeline_ncclErr = ncclCommGetAsyncError(pipeline_comm, &pipeline_ncclAsyncErr);
             }
 
             if (tensor_ncclErr != ncclSuccess || pipeline_ncclErr != ncclSuccess)
             {
-                std::string error_msg = "NCCL Error : ncclCommGetAsyncError returned " + std::to_string(tensor_ncclErr) + " (tensor_para) " + std::to_string(pipeline_ncclErr) + " (pipeline_para)";
-                throw std::runtime_error(error_msg);
+                // Only throw if we actually have valid communicators
+                if ((tensor_comm != nullptr && tensor_ncclErr != ncclSuccess) ||
+                    (pipeline_comm != nullptr && pipeline_ncclErr != ncclSuccess)) {
+                    std::string error_msg = "NCCL Error : ncclCommGetAsyncError returned " + std::to_string(tensor_ncclErr) + " (tensor_para) " + std::to_string(pipeline_ncclErr) + " (pipeline_para)";
+                    throw std::runtime_error(error_msg);
+                }
             }
 
-            if (tensor_ncclAsyncErr != ncclSuccess)
+            if (tensor_ncclAsyncErr != ncclSuccess && tensor_comm != nullptr)
             {
                 // An asynchronous error happened. Stop the operation and destroy
                 // the communicator
@@ -286,7 +316,7 @@ namespace fastertransformer
                 }
             }
 
-            if (pipeline_ncclAsyncErr != ncclSuccess)
+            if (pipeline_ncclAsyncErr != ncclSuccess && pipeline_comm != nullptr)
             {
                 // An asynchronous error happened. Stop the operation and destroy
                 // the communicator

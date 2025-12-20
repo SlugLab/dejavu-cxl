@@ -91,7 +91,11 @@ int getCommWorldRank()
 {
     int rank = 0;
 #ifdef BUILD_MULTI_GPU
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
 #endif
     return rank;
 }
@@ -100,7 +104,11 @@ int getCommWorldSize()
 {
     int world_size = 1;
 #ifdef BUILD_MULTI_GPU
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    }
 #endif
     return world_size;
 }

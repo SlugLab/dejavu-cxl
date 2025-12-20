@@ -45,8 +45,6 @@ void ParallelGptContextDecoder<T>::initialize()
 
     if (is_gqa) {
         // Use GQA constructor with separate kv_head_num
-        fprintf(stderr, "[FT][PGCD] Initializing with GQA: head_num=%zu, kv_head_num=%zu\n",
-                head_num_, num_kv_heads_);
         self_attention_layer_ = new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
                                                                               max_seq_len_,
                                                                               head_num_,
@@ -207,10 +205,13 @@ void ParallelGptContextDecoder<T>::allocateBuffer(size_t batch_size, size_t seq_
             allocator_->reMalloc(compact_attention_mask_, sizeof(T) * batch_size * seq_len * seq_len, false));
         compact_input_lengths_ =
             reinterpret_cast<int*>(allocator_->reMalloc(compact_input_lengths_, sizeof(int) * batch_size, false));
+        // Cache layer uses head_num * size_per_head, NOT hidden_units_
+        const size_t local_head_num = head_num_ / tensor_para_.world_size_;
+        const size_t cache_layer_size = batch_size * seq_len * local_head_num * size_per_head_;
         k_cache_layer_ = reinterpret_cast<T*>(
-            allocator_->reMalloc(k_cache_layer_, sizeof(T) * batch_size * seq_len * hidden_units_, false));
+            allocator_->reMalloc(k_cache_layer_, sizeof(T) * cache_layer_size, false));
         v_cache_layer_ = reinterpret_cast<T*>(
-            allocator_->reMalloc(v_cache_layer_, sizeof(T) * batch_size * seq_len * hidden_units_, false));
+            allocator_->reMalloc(v_cache_layer_, sizeof(T) * cache_layer_size, false));
     }
 }
 
@@ -354,8 +355,6 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(size_t               max
     is_token_phase_(is_token_phase),
     num_slots_(num_slots)
 {
-    fprintf(stderr, "[FT][PGCD] Constructor: head_num=%zu, num_kv_heads=%zu, hidden_units=%zu\n",
-            head_num_, num_kv_heads_, hidden_units_);
     initialize();
 }
 
@@ -665,26 +664,30 @@ void ParallelGptContextDecoder<T>::forward(
     memory_len_       = max_seq_len;
     kc_offset_        = 16 / sizeof(T);
     vc_offset_        = size_per_head_;
-    per_layer_offset_ = memory_len_ * sizeof(T) * batch_size * beam_width_ * (hidden_units_ / tensor_para_.world_size_);
+    // Use local_head_num * size_per_head for cache sizes, not hidden_units_
+    // This is critical for models like Qwen3 where hidden_size != head_num * size_per_head
+    const size_t cache_local_head_num = head_num_ / tensor_para_.world_size_;
+    const size_t cache_hidden_dim = cache_local_head_num * size_per_head_;
+    per_layer_offset_ = memory_len_ * sizeof(T) * batch_size * beam_width_ * cache_hidden_dim;
     key_scaling_factor_ =
         batch_size * beam_width_ * (head_num_ / tensor_para_.world_size_) * size_per_head_ / (16 / sizeof(T));
     value_scaling_factor_ = batch_size * beam_width_ * (head_num_ / tensor_para_.world_size_);
     layer_prompt_size_ =
-        (hidden_units_ / tensor_para_.world_size_) * request_batch_size * beam_width_ * sizeof(T) * prompt_len_;
-    cache_size_ = (hidden_units_ / tensor_para_.world_size_) * request_batch_size * beam_width_ * num_layer_ * sizeof(T)
+        cache_hidden_dim * request_batch_size * beam_width_ * sizeof(T) * prompt_len_;
+    cache_size_ = cache_hidden_dim * request_batch_size * beam_width_ * num_layer_ * sizeof(T)
                   * max_seq_len;
     // for pipelining
     ubatch_layer_prompt_size_ =
-        (hidden_units_ / tensor_para_.world_size_) * local_batch_size * beam_width_ * sizeof(T) * prompt_len_;
-    per_layer_ubatch_offset_ = (hidden_units_ / tensor_para_.world_size_) * beam_width_ * memory_len_ * sizeof(T);
+        cache_hidden_dim * local_batch_size * beam_width_ * sizeof(T) * prompt_len_;
+    per_layer_ubatch_offset_ = cache_hidden_dim * beam_width_ * memory_len_ * sizeof(T);
 
     layers_per_pp_ = num_layer_ / pipeline_para_.world_size_;
     if (pipeline_para_.rank_ == pipeline_para_.world_size_ - 1) {
         layers_per_pp_ += (num_layer_ % pipeline_para_.world_size_);
     }
-    const size_t total_cache_size = (hidden_units_ / tensor_para_.world_size_) * request_batch_size * beam_width_
+    const size_t total_cache_size = cache_hidden_dim * request_batch_size * beam_width_
                                     * layers_per_pp_ * sizeof(T) * max_seq_len;
-    const size_t layer_prompt_size = (hidden_units_ / tensor_para_.world_size_) * request_batch_size * beam_width_
+    const size_t layer_prompt_size = cache_hidden_dim * request_batch_size * beam_width_
                                      * sizeof(T) * prompt_len_;  // TODO
 
     int ubatch_id = input_tensors->isExist("ite") ? input_tensors->at("ite").getVal<int>() : 0;
@@ -729,22 +732,9 @@ void ParallelGptContextDecoder<T>::forward(
 
         auto startl = std::chrono::high_resolution_clock::now();
 
-        // Debug: print moe_layer_index_ size once at start
-        if (ite == 0) {
-            fprintf(stderr, "[FT][ContextDecoder] moe_layer_index_.size()=%zu expert_num_=%zu moe_k_=%zu\n",
-                    moe_layer_index_.size(), expert_num_, moe_k_);
-            fflush(stderr);
-        }
-
         for (uint l = 0; l < num_layer_; l++) {
             PUSH_RANGE(fmtstr("layer_%u", l));
             bool use_moe = std::find(moe_layer_index_.begin(), moe_layer_index_.end(), l) != moe_layer_index_.end();
-
-            // Debug: print use_moe for first layer
-            if (l == 0 && ite == 0) {
-                fprintf(stderr, "[FT][ContextDecoder] Layer 0: use_moe=%d\n", use_moe);
-                fflush(stderr);
-            }
 
             if (isValidLayerParallelId(l) == false) {
                 continue;
@@ -798,31 +788,6 @@ void ParallelGptContextDecoder<T>::forward(
                 POP_RANGE;
             }
 
-            // Debug: check weight pointer BEFORE layernorm
-            if (l == 0 && ite == 0) {
-                const T* qkv_ptr = layer_weight->self_attention_weights.query_weight.kernel;
-                const float* scale_ptr = layer_weight->self_attention_weights.query_weight.scale;
-                const T* gamma_ptr = layer_weight->pre_layernorm_weights.gamma;
-                const T* beta_ptr = layer_weight->pre_layernorm_weights.beta;
-                fprintf(stderr, "[FT][ContextDecoder] BEFORE pre-mha layernorm:\n");
-                fprintf(stderr, "  QKV ptr=%p\n", (void*)qkv_ptr);
-                fprintf(stderr, "  scale ptr=%p\n", (void*)scale_ptr);
-                fprintf(stderr, "  gamma ptr=%p, beta ptr=%p\n", (void*)gamma_ptr, (void*)beta_ptr);
-                fprintf(stderr, "  decoder_input=%p, decoder_normed_input_=%p\n", (void*)decoder_input, (void*)decoder_normed_input_);
-                fprintf(stderr, "  h_token_num=%zu, hidden_units_=%zu, int8_mode_=%d\n", h_token_num, hidden_units_, int8_mode_);
-                char test_buf[8];
-                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "  QKV test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                // Test gamma and decoder_input as well
-                test_err = cudaMemcpy(test_buf, gamma_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "  gamma test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                test_err = cudaMemcpy(test_buf, decoder_input, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "  decoder_input test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                test_err = cudaMemcpy(test_buf, decoder_normed_input_, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "  decoder_normed_input_ test err=%s\n", test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                fflush(stderr);
-            }
-
             PUSH_RANGE("pre-mha layernorm");
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
                 // Use opt_version=0 to disable optimized kernel that might have issues
@@ -838,19 +803,6 @@ void ParallelGptContextDecoder<T>::forward(
                                        int8_mode_,
                                        stream_,
                                        0);  // opt_version=0 to use simple kernel
-            }
-
-            gpu_sync(stream_);
-
-            // Debug: check weight pointer AFTER layernorm
-            if (l == 0 && ite == 0) {
-                const T* qkv_ptr = layer_weight->self_attention_weights.query_weight.kernel;
-                fprintf(stderr, "[FT][ContextDecoder] AFTER pre-mha layernorm: QKV ptr=%p\n", (void*)qkv_ptr);
-                char test_buf[8];
-                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "[FT][ContextDecoder] AFTER pre-mha layernorm: QKV test err=%s\n",
-                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                fflush(stderr);
             }
 
             POP_RANGE;
@@ -892,7 +844,10 @@ void ParallelGptContextDecoder<T>::forward(
             }
 
             // The key/value cache stride per batch.
-            const size_t cache_stride_per_batch = hidden_units_ / tensor_para_.world_size_ * max_seq_len;
+            // Note: Use head_num * size_per_head for cache size, not hidden_units_
+            // This is important for models like Qwen3 where hidden_size != head_num * size_per_head
+            const size_t local_head_num = head_num_ / tensor_para_.world_size_;
+            const size_t cache_stride_per_batch = local_head_num * size_per_head_ * max_seq_len;
             // The key/value cache offset of the layer.
             const size_t cache_layer_offset =
                 (l - getFirstLayerParallelId()) * request_batch_size * cache_stride_per_batch;
@@ -908,17 +863,6 @@ void ParallelGptContextDecoder<T>::forward(
                  Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units_}, self_attn_output_}},
                 {"key_cache", Tensor{MEMORY_GPU, data_type, self_k_cache_size, k_cache_ptr}},
                 {"value_cache", Tensor{MEMORY_GPU, data_type, self_v_cache_size, v_cache_ptr}}};
-
-            // Debug: check weight pointer before attention forward
-            if (l == 0 && ite == 0) {
-                const T* qkv_ptr = layer_weight->self_attention_weights.query_weight.kernel;
-                fprintf(stderr, "[FT][ContextDecoder] Before attention forward: QKV ptr=%p\n", (void*)qkv_ptr);
-                char test_buf[8];
-                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "[FT][ContextDecoder] QKV pointer test: err=%s\n",
-                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                fflush(stderr);
-            }
 
             self_attention_layer_->forward(
                 &self_attention_output_tensors, &self_attention_input_tensors, &layer_weight->self_attention_weights);
@@ -977,20 +921,6 @@ void ParallelGptContextDecoder<T>::forward(
             }
 
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
-                // Debug: print pointers before post-attention layernorm
-                if (l == 0 && ite == 0) {
-                    fprintf(stderr, "[FT][ContextDecoder] BEFORE post-attn layernorm:\n");
-                    fprintf(stderr, "  self_attn_output_=%p, normed_self_attn_output_=%p\n",
-                            (void*)self_attn_output_, (void*)normed_self_attn_output_);
-                    fprintf(stderr, "  decoder_input=%p\n", (void*)decoder_input);
-                    fprintf(stderr, "  self_attn_layernorm gamma=%p, beta=%p\n",
-                            (void*)layer_weight->self_attn_layernorm_weights.gamma,
-                            (void*)layer_weight->self_attn_layernorm_weights.beta);
-                    fprintf(stderr, "  attn_output_bias=%p\n",
-                            (void*)layer_weight->self_attention_weights.attention_output_weight.bias);
-                    fprintf(stderr, "  h_token_num=%zu, hidden_units_=%zu\n", h_token_num, hidden_units_);
-                    fflush(stderr);
-                }
                 // Use opt_version=0 to handle null beta (RMSNorm) properly
                 invokeGeneralAddBiasResidualPreLayerNorm(
                     has_adapters_ ? after_adapter_attn_output_ : self_attn_output_,
@@ -1012,13 +942,6 @@ void ParallelGptContextDecoder<T>::forward(
                     int8_mode_,
                     stream_,
                     0);  // opt_version=0 for null beta support
-                // Debug: check for errors after post-attention layernorm
-                if (l == 0 && ite == 0) {
-                    cudaError_t err = cudaStreamSynchronize(stream_);
-                    fprintf(stderr, "[FT][ContextDecoder] AFTER post-attn layernorm: err=%s\n",
-                            err == cudaSuccess ? "OK" : cudaGetErrorString(err));
-                    fflush(stderr);
-                }
             }
             else if (layernorm_type_ == LayerNormType::post_layernorm) {
                 invokeAddBiasResidualLayerNorm(after_adapter_attn_output_,
@@ -1069,51 +992,8 @@ void ParallelGptContextDecoder<T>::forward(
                     Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k_}, expert_for_source_row_});
             }
 
-            // Debug: print before FFN/MoE layer
-            if (l == 0 && ite == 0) {
-                fprintf(stderr, "[FT][ContextDecoder] BEFORE FFN layer: use_moe=%d moe_k_=%zu\n", use_moe, moe_k_);
-                fprintf(stderr, "  ffn_input ptr=%p\n",
-                        (void*)(layernorm_type_ == LayerNormType::pre_layernorm ? normed_self_attn_output_ : after_adapter_attn_output_));
-                fprintf(stderr, "  inter_size_=%zu, tensor_para_.world_size_=%d\n", inter_size_, tensor_para_.world_size_);
-                if (use_moe) {
-                    fprintf(stderr, "  fc2_result_=%p, expert_scales_=%p\n", (void*)fc2_result_, (void*)expert_scales_);
-                    fprintf(stderr, "  expanded_source_row_to_expanded_dest_row_=%p\n", (void*)expanded_source_row_to_expanded_dest_row_);
-                    fprintf(stderr, "  expert_for_source_row_=%p\n", (void*)expert_for_source_row_);
-                }
-                fprintf(stderr, "  ffn_weights.gate=%p\n", (void*)layer_weight->ffn_weights.gating_weight.kernel);
-                fprintf(stderr, "  ffn_weights.intermediate=%p\n", (void*)layer_weight->ffn_weights.intermediate_weight.kernel);
-                fprintf(stderr, "  ffn_weights.output=%p\n", (void*)layer_weight->ffn_weights.output_weight.kernel);
-                fflush(stderr);
-            }
-            // Debug: about to call resetInterSize
-            if (l == 0 && ite == 0) {
-                fprintf(stderr, "[FT][ContextDecoder] ffn_layer_=%p inter_size_=%zu\n", (void*)ffn_layer_, inter_size_);
-                fprintf(stderr, "[FT][ContextDecoder] Calling resetInterSize(%zu)\n", inter_size_ / tensor_para_.world_size_);
-                fflush(stderr);
-            }
-            if (ffn_layer_ == nullptr) {
-                fprintf(stderr, "[FT][ContextDecoder] ERROR: ffn_layer_ is NULL!\n");
-                fflush(stderr);
-            }
             ffn_layer_->resetInterSize(inter_size_ / tensor_para_.world_size_);
-            // Debug: after resetInterSize
-            if (l == 0 && ite == 0) {
-                fprintf(stderr, "[FT][ContextDecoder] After resetInterSize\n");
-                fflush(stderr);
-            }
-            // Debug: about to call forward
-            if (l == 0 && ite == 0) {
-                fprintf(stderr, "[FT][ContextDecoder] Calling ffn_layer_->forward()\n");
-                fflush(stderr);
-            }
             ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
-            // Debug: check after FFN layer
-            if (l == 0 && ite == 0) {
-                cudaError_t err = cudaStreamSynchronize(stream_);
-                fprintf(stderr, "[FT][ContextDecoder] AFTER FFN layer: err=%s\n",
-                        err == cudaSuccess ? "OK" : cudaGetErrorString(err));
-                fflush(stderr);
-            }
 
             // the adapter after ffn (only pre layernorm currently)
             PUSH_RANGE("post ffn");
@@ -1224,6 +1104,7 @@ void ParallelGptContextDecoder<T>::forward(
                                                         hidden_units_,
                                                         moe_k_,
                                                         stream_);
+                    // Use opt_version=0 for RMSNorm (nullptr beta)
                     invokeGeneralLayerNorm(decoder_output,
                                            decoder_output,
                                            layer_weight->self_attn_layernorm_weights.gamma,
@@ -1233,7 +1114,8 @@ void ParallelGptContextDecoder<T>::forward(
                                            hidden_units_,
                                            (float*)nullptr,
                                            0,
-                                           stream_);
+                                           stream_,
+                                           layer_weight->self_attn_layernorm_weights.beta ? 2 : 0);
                 }
             }
             gpu_sync(stream_);

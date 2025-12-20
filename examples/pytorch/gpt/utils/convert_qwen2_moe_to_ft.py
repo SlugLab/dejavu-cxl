@@ -117,6 +117,7 @@ def convert_qwen2_moe_to_ft(args):
         'model_name': 'qwen2_moe',
         'head_num': str(num_attention_heads),
         'size_per_head': str(head_dim),
+        'hidden_size': str(hidden_size),
         'inter_size': str(ft_inter_size),
         'num_layer': str(num_layers),
         'vocab_size': str(vocab_size),
@@ -126,6 +127,8 @@ def convert_qwen2_moe_to_ft(args):
         'weight_data_type': args.weight_data_type,
         'tensor_para_size': str(args.infer_gpu_num),
         'layernorm_eps': str(config.get('rms_norm_eps', 1e-6)),
+        'layernorm_type': 'pre_layernorm',  # Qwen uses RMSNorm before attention (pre-layernorm)
+        'activation_type': 'SiGLU',  # Qwen uses SwiGLU/SiGLU activation
         'num_kv_heads': str(num_kv_heads),
     }
 
@@ -159,13 +162,14 @@ def convert_qwen2_moe_to_ft(args):
         ln_weight.tofile(saved_dir / "model.final_layernorm.weight.bin")
         print(f"  Saved final layernorm: {ln_weight.shape}")
 
-    # Convert LM head
+    # Convert LM head - no transpose needed
+    # CUBLAS GemmEx with CUBLAS_OP_T handles the transpose automatically
+    # HuggingFace lm_head.weight is (vocab_size, hidden_size), save as-is
     if 'lm_head.weight' in hf_weights:
         lm_head = hf_weights['lm_head.weight']
-        # Transpose for CUBLAS column-major format
-        lm_head_transposed = lm_head.T.contiguous().float().numpy().astype(np_weight_dtype)
-        lm_head_transposed.tofile(saved_dir / "model.lm_head.weight.bin")
-        print(f"  Saved LM head: {lm_head.shape} (transposed to {lm_head_transposed.shape})")
+        lm_head_np = lm_head.float().numpy().astype(np_weight_dtype)
+        lm_head_np.tofile(saved_dir / "model.lm_head.weight.bin")
+        print(f"  Saved LM head: {lm_head.shape}")
 
     # Convert layer weights
     print(f"\nConverting {num_layers} transformer layers...")

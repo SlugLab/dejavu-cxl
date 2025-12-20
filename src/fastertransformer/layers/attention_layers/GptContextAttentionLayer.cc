@@ -237,8 +237,50 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
     // Use batch major
     // put k/v_buf from shape [B, H, PL + L, Dh]
     // to cache [B, H, Dh/x, PL + L, x]  and [B, H, PL + L, Dh/x, x], PL denotes prompt length
-    invokeTranspose4dBatchMajor(output_tensors->getPtr<T>("key_cache"),
-                                output_tensors->getPtr<T>("value_cache"),
+    // Debug: print invokeTranspose4dBatchMajor parameters
+    T* key_cache_ptr = output_tensors->getPtr<T>("key_cache");
+    T* value_cache_ptr = output_tensors->getPtr<T>("value_cache");
+
+    // Print key_cache shape for debugging
+    fprintf(stderr, "[FT][ATTN] key_cache shape: [");
+    for (size_t i = 0; i < output_tensors->at("key_cache").shape.size(); i++) {
+        fprintf(stderr, "%zu%s", output_tensors->at("key_cache").shape[i],
+                (i < output_tensors->at("key_cache").shape.size()-1) ? ", " : "");
+    }
+    fprintf(stderr, "]\n");
+
+    // Calculate expected cache size
+    size_t cache_size_elems = 1;
+    for (auto& dim : output_tensors->at("key_cache").shape) cache_size_elems *= dim;
+    size_t needed_elems = request_batch_size * local_head_num_ * size_per_head_ * max_seq_len;
+    fprintf(stderr, "[FT][ATTN] Before invokeTranspose4dBatchMajor:\n");
+    fprintf(stderr, "  key_cache=%p, value_cache=%p\n", (void*)key_cache_ptr, (void*)value_cache_ptr);
+    fprintf(stderr, "  k_buf_2_=%p, v_buf_2_=%p\n", (void*)k_buf_2_, (void*)v_buf_2_);
+    fprintf(stderr, "  batch=%d, input_seq=%d, max_seq=%d, Dh=%zu, heads=%zu\n",
+            request_batch_size, max_prompt_length + request_seq_len, max_seq_len,
+            size_per_head_, local_head_num_);
+    fprintf(stderr, "  cache_size_elems=%zu, needed_elems=%zu\n", cache_size_elems, needed_elems);
+
+    // Validate pointers before calling kernel
+    {
+        char test_buf[16];
+        cudaError_t e1 = cudaMemcpy(test_buf, key_cache_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+        cudaError_t e2 = cudaMemcpy(test_buf, value_cache_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
+        cudaError_t e3 = cudaMemcpy(test_buf, k_buf_2_, sizeof(test_buf), cudaMemcpyDeviceToHost);
+        cudaError_t e4 = cudaMemcpy(test_buf, v_buf_2_, sizeof(test_buf), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "  Pointer validity: key_cache=%s, value_cache=%s, k_buf_2_=%s, v_buf_2_=%s\n",
+                e1 == cudaSuccess ? "OK" : cudaGetErrorString(e1),
+                e2 == cudaSuccess ? "OK" : cudaGetErrorString(e2),
+                e3 == cudaSuccess ? "OK" : cudaGetErrorString(e3),
+                e4 == cudaSuccess ? "OK" : cudaGetErrorString(e4));
+        if (e1 != cudaSuccess || e2 != cudaSuccess) {
+            cudaGetLastError();  // Clear any error
+        }
+    }
+    fflush(stderr);
+
+    invokeTranspose4dBatchMajor(key_cache_ptr,
+                                value_cache_ptr,
                                 k_buf_2_,
                                 v_buf_2_,
                                 request_batch_size,
@@ -249,7 +291,19 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
                                 stream_);
     // IDEA : after this, k_cache = (batch_size, num_heads, Dh/x, prefix_prompt_len + L, x)
     // k_cache = (batch_size, num_heads, prefix_prompt_len + L, Dh)
-    CUDACHECK(cudaStreamSynchronize(stream_)); //sync_check_cuda_error();
+
+    // Debug: sync and check for errors after Transpose4dBatchMajor
+    {
+        cudaError_t tr_err = cudaStreamSynchronize(stream_);
+        if (tr_err != cudaSuccess) {
+            fprintf(stderr, "[FT][ATTN] ERROR after invokeTranspose4dBatchMajor: %s\n",
+                    cudaGetErrorString(tr_err));
+            cudaGetLastError();  // Clear error
+        } else {
+            fprintf(stderr, "[FT][ATTN] invokeTranspose4dBatchMajor completed OK\n");
+        }
+        fflush(stderr);
+    }
 
     // TODO: fmha kernels doesn't support different seq lengths of q and kv
     if (attention_type == AttentionType::FUSED_MHA) {
@@ -264,6 +318,16 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
         const int            attention_seq_len_1 = request_seq_len;                      // q length
         const int            attention_seq_len_2 = max_prompt_length + request_seq_len;  // kv length
         const T              qk_scale            = static_cast<T>(1.0f / sqrtf(size_per_head_ * 1.0f));
+
+        // Debug: print attention path decision
+        fprintf(stderr, "[FT][ATTN] Attention path decision:\n");
+        fprintf(stderr, "  attention_type=%d (FUSED_MHA=%d), is_qk_buf_float_=%d, gemm_data_type=%d\n",
+                (int)attention_type, (int)AttentionType::FUSED_MHA, (int)is_qk_buf_float_, (int)gemm_data_type);
+        fprintf(stderr, "  Will use %s path\n",
+                (attention_type == AttentionType::FUSED_MHA) ? "FUSED_MHA" :
+                (is_qk_buf_float_ && gemm_data_type != CUDA_R_32F) ? "MIXED_PRECISION" : "FP16");
+        fflush(stderr);
+
         if (attention_type != AttentionType::FUSED_MHA) {
             if (is_qk_buf_float_ == true && gemm_data_type != CUDA_R_32F) {
                 PUSH_RANGE("Q*K batch gemm");

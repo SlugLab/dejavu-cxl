@@ -151,8 +151,11 @@ void ParallelGpt<T>::allocateBuffer(size_t batch_size,
            pipeline_para_.rank_,
            local_batch_size,
            num_microbatches);
+    // Cache size uses head_num * size_per_head, NOT hidden_units_
+    // This is critical for models like Qwen3 where hidden_size != head_num * size_per_head
+    const size_t local_head_num = head_num_ / tensor_para_.world_size_;
     const size_t self_cache_size =
-        (num_layer_ / pipeline_para_.world_size_) * batchxbeam * memory_len * hidden_units_ / tensor_para_.world_size_;
+        (num_layer_ / pipeline_para_.world_size_) * batchxbeam * memory_len * local_head_num * size_per_head_;
 
     if (vocab_size_ != vocab_size_padded_) {
         padded_embedding_kernel_ =
@@ -478,6 +481,7 @@ void ParallelGpt<T>::computeContextCumLogProbs(float*                      cum_l
 
     if (pipeline_para_.rank_ == pipeline_para_.world_size_ - 1) {
         // normed decoder output [batch_size * beam_width, max_input_length, hidden_units_]
+        // Use opt_version=0 for RMSNorm (nullptr beta)
         invokeGeneralLayerNorm(lp_normed_decoder_output_buf_,
                                context_decoder_outputs,
                                gpt_weights->post_decoder_layernorm.gamma,
@@ -487,7 +491,8 @@ void ParallelGpt<T>::computeContextCumLogProbs(float*                      cum_l
                                hidden_units_,
                                (float*)nullptr,
                                0,
-                               stream_);
+                               stream_,
+                               gpt_weights->post_decoder_layernorm.beta ? 2 : 0);
         gpu_sync(stream_);
         if (tensor_para_.world_size_ == 1) {
             float alpha = 1.0f;
@@ -898,17 +903,6 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                            is_return_context_cum_log_probs,
                            reload);
             sync_check_cuda_error();
-
-            // Debug: check weight pointer after allocateBuffer
-            {
-                const T* qkv_ptr = gpt_weights->decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
-                fprintf(stderr, "[FT][GPT] After allocateBuffer: QKV ptr=%p\n", (void*)qkv_ptr);
-                char test_buf[8];
-                cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "[FT][GPT] After allocateBuffer: QKV test err=%s\n",
-                        test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                fflush(stderr);
-            }
         }
     }
 
@@ -1138,22 +1132,6 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                                      nullptr};
 
                 if (1) {
-                    // Debug: check QKV weight BEFORE embedding lookup
-                    {
-                        const T* qkv_ptr = gpt_weights->decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
-                        fprintf(stderr, "[FT][GPT] BEFORE embedding lookup: QKV ptr=%p\n", (void*)qkv_ptr);
-                        fprintf(stderr, "[FT][GPT] embedding_table=%p, pos_table=%p\n",
-                                (void*)gpt_weights->pre_decoder_embedding_table,
-                                (void*)gpt_weights->position_encoding_table);
-                        fprintf(stderr, "[FT][GPT] context_decoder_input_buf_=%p, hidden_units_=%zu\n",
-                                (void*)context_decoder_input_buf_, hidden_units_);
-                        char test_buf[8];
-                        cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                        fprintf(stderr, "[FT][GPT] BEFORE embedding: QKV test err=%s\n",
-                                test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                        fflush(stderr);
-                    }
-
                     invokeInputIdsEmbeddingLookupPosEncoding(context_decoder_input_buf_,
                                                              output_ids_buf_,
                                                              gpt_weights->pre_decoder_embedding_table,
@@ -1168,17 +1146,6 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                                              stream_);
 
                     sync_check_cuda_error();
-
-                    // Debug: check QKV weight AFTER embedding lookup
-                    {
-                        const T* qkv_ptr = gpt_weights->decoder_layer_weights[0]->self_attention_weights.query_weight.kernel;
-                        fprintf(stderr, "[FT][GPT] AFTER embedding lookup: QKV ptr=%p\n", (void*)qkv_ptr);
-                        char test_buf[8];
-                        cudaError_t test_err = cudaMemcpy(test_buf, qkv_ptr, sizeof(test_buf), cudaMemcpyDeviceToHost);
-                        fprintf(stderr, "[FT][GPT] AFTER embedding: QKV test err=%s\n",
-                                test_err == cudaSuccess ? "OK" : cudaGetErrorString(test_err));
-                        fflush(stderr);
-                    }
                 }
                 sync_check_cuda_error();
                 POP_RANGE;
@@ -1186,6 +1153,7 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
 
             if (gpt_variant_params_.has_pre_decoder_layernorm) {
                 PUSH_RANGE("pre-decoder layernorm");
+                // Use opt_version=0 for RMSNorm (nullptr beta)
                 invokeGeneralLayerNorm(context_decoder_normed_input_buf_,
                                        context_decoder_input_buf_,
                                        gpt_weights->pre_decoder_layernorm.gamma,
@@ -1195,7 +1163,8 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                        hidden_units_,
                                        (float*)nullptr,
                                        0,
-                                       stream_);
+                                       stream_,
+                                       gpt_weights->pre_decoder_layernorm.beta ? 2 : 0);
                 POP_RANGE;
             }
 
@@ -1346,9 +1315,10 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
             cudaAutoCpy(output_ids_buf_, tiled_input_ids_buf_, batch_size * beam_width, stream_);
 
             if (reload) {
-
+                // Cache size uses head_num * size_per_head, NOT hidden_units_
+                const size_t local_head_num = head_num_ / tensor_para_.world_size_;
                 const size_t self_cache_size = (num_layer_ / pipeline_para_.world_size_) * memory_len * sizeof(T)
-                                               * hidden_units_ / tensor_para_.world_size_;
+                                               * local_head_num * size_per_head_;
                 const size_t self_decoder_size = batch_size * beam_width * hidden_units_ * sizeof(T);
 
                 cudaMemcpy(key_cache_,
@@ -1492,6 +1462,7 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                     gpu_sync(stream_);
 
                     if (gpt_variant_params_.has_pre_decoder_layernorm) {
+                        // Use opt_version=0 for RMSNorm (nullptr beta)
                         invokeGeneralLayerNorm(decoder_normed_input_buf_ + hidden_units_offset,
                                                decoder_input_buf_ + hidden_units_offset,
                                                gpt_weights->pre_decoder_layernorm.gamma,
@@ -1501,7 +1472,8 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                                hidden_units_,
                                                (float*)nullptr,
                                                0,
-                                               stream_);
+                                               stream_,
+                                               gpt_weights->pre_decoder_layernorm.beta ? 2 : 0);
                     }
                     gpu_sync(stream_);
                 }
@@ -1568,7 +1540,10 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                 PUSH_RANGE("Token Final Layer Norm");
                 T* decoder_output_final_buf =
                     gpt_variant_params_.has_post_decoder_layernorm ? normed_decoder_output_buf_ : decoder_output_buf_;
+
                 if (gpt_variant_params_.has_post_decoder_layernorm) {
+                    // Use opt_version=0 to handle nullptr beta (RMSNorm has no beta)
+                    // The optimized path (opt_version > 0) has hardcoded IS_BETA=true which crashes on nullptr
                     invokeGeneralLayerNorm(normed_decoder_output_buf_ + hidden_units_offset,
                                            decoder_output_buf_ + hidden_units_offset,
                                            gpt_weights->post_decoder_layernorm.gamma,
@@ -1578,7 +1553,8 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                            hidden_units_,
                                            (float*)nullptr,
                                            0,
-                                           stream_);
+                                           stream_,
+                                           0);  // opt_version=0: use non-optimized kernel that handles nullptr beta
                 }
                 gpu_sync(stream_);
                 POP_RANGE;
@@ -1817,9 +1793,17 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
         }
         else {
             if (tensor_para_.rank_ == 0) {
-                int myRank;
-                MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
-                printf("[BENCHMARK] RANK %d TOKEN generation took %f ms\n", myRank, ms_double.count());
+                if (tensor_para_.world_size_ > 1) {
+                    int myRank = 0;
+                    int mpi_initialized = 0;
+                    MPI_Initialized(&mpi_initialized);
+                    if (mpi_initialized) {
+                        MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
+                    }
+                    printf("[BENCHMARK] RANK %d TOKEN generation took %f ms\n", myRank, ms_double.count());
+                } else {
+                    printf("[BENCHMARK] TOKEN generation took %f ms\n", ms_double.count());
+                }
             }
         }
 
@@ -1856,10 +1840,17 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
     duration<double, std::milli> ms_double = temp - total_startt;
 
     if (tensor_para_.rank_ == 0) {
-        int myRank;
-        MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
-
-        printf("[BENCHMARK] RANK %d, TOTAL TOKEN generation took %f ms\n", myRank, ms_double.count());
+        if (tensor_para_.world_size_ > 1) {
+            int myRank = 0;
+            int mpi_initialized = 0;
+            MPI_Initialized(&mpi_initialized);
+            if (mpi_initialized) {
+                MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
+            }
+            printf("[BENCHMARK] RANK %d, TOTAL TOKEN generation took %f ms\n", myRank, ms_double.count());
+        } else {
+            printf("[BENCHMARK] TOTAL TOKEN generation took %f ms\n", ms_double.count());
+        }
     }
 
     printf("Process %d done\n", pipeline_para_.rank_);

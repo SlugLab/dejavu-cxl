@@ -385,6 +385,7 @@ namespace fastertransformer
 
             if (layernorm_type_ == LayerNormType::pre_layernorm)
             {
+                // Use opt_version=0 for RMSNorm (nullptr beta) - optimized path crashes on nullptr
                 invokeGeneralLayerNorm(decoder_normed_input_,
                                        decoder_input,
                                        layer_weight->pre_layernorm_weights.gamma,
@@ -394,7 +395,8 @@ namespace fastertransformer
                                        hidden_units_,
                                        const_cast<float *>(layer_weight->self_attention_weights.query_weight.scale),
                                        int8_mode_,
-                                       stream_);
+                                       stream_,
+                                       layer_weight->pre_layernorm_weights.beta ? 2 : 0);
             }
             sync_check_cuda_error();
             POP_RANGE;
@@ -475,6 +477,7 @@ namespace fastertransformer
 
             if (layernorm_type_ == LayerNormType::pre_layernorm)
             {
+                // Use opt_version=0 when beta is nullptr (RMSNorm) to avoid optimized kernel crash
                 invokeGeneralAddBiasResidualPreLayerNorm(
                     // in case of has_adaptor false isn't it self_attn_output_? i.e.
                     //   has_adapters_ ? after_adapter_attn_outpu_ : self_attn_output_,
@@ -494,7 +497,8 @@ namespace fastertransformer
                     const_cast<float *>(layer_weight->ffn_weights.intermediate_weight.scale),
                     (float *)nullptr,
                     int8_mode_,
-                    stream_);
+                    stream_,
+                    layer_weight->self_attn_layernorm_weights.beta ? 2 : 0);
             }
             else if (layernorm_type_ == LayerNormType::post_layernorm)
             {
@@ -663,6 +667,7 @@ namespace fastertransformer
                                                         hidden_units_,
                                                         moe_k_,
                                                         stream_);
+                    // Use opt_version=0 for RMSNorm (nullptr beta)
                     invokeGeneralLayerNorm(decoder_output,
                                            decoder_output,
                                            layer_weight->self_attn_layernorm_weights.gamma,
@@ -672,7 +677,8 @@ namespace fastertransformer
                                            hidden_units_,
                                            (float *)nullptr,
                                            0,
-                                           stream_);
+                                           stream_,
+                                           layer_weight->self_attn_layernorm_weights.beta ? 2 : 0);
                 }
             }
             sync_check_cuda_error();

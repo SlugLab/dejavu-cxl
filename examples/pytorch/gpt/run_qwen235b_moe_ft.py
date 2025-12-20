@@ -20,11 +20,10 @@ import time
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from transformers import AutoTokenizer
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(dir_path, "../../.."))
-
-import examples.pytorch.gpt.utils.gpt_token_encoder as encoder
 from examples.pytorch.gpt.utils import comm
 from examples.pytorch.gpt.utils import gpt_decoder
 from examples.pytorch.gpt.utils.parallel_gpt_dv import ParallelGPT
@@ -76,6 +75,96 @@ def setup_moe_ft_environment(args):
     print(f"  Log Level: {args.log_level}")
     print("=" * 80)
     print()
+
+
+def load_config_from_checkpoint(ckpt_path):
+    """
+    Load model configuration from checkpoint's config.ini file.
+    Returns a dict with model parameters, or None if config not found.
+    """
+    config_path = os.path.join(ckpt_path, 'config.ini')
+    if not os.path.exists(config_path):
+        print(f"[WARNING] No config.ini found at {config_path}")
+        return None
+
+    config = configparser.ConfigParser()
+    config.read(config_path)
+
+    result = {}
+
+    # Parse [gpt] section
+    if 'gpt' in config:
+        gpt = config['gpt']
+        result['head_num'] = int(gpt.get('head_num', 64))
+        result['size_per_head'] = int(gpt.get('size_per_head', 128))
+        result['hidden_size'] = int(gpt.get('hidden_size', 0))
+        result['inter_size'] = int(gpt.get('inter_size', 29568))
+        result['layer_num'] = int(gpt.get('num_layer', 80))
+        result['vocab_size'] = int(gpt.get('vocab_size', 152064))
+        result['start_id'] = int(gpt.get('start_id', 151643))
+        result['end_id'] = int(gpt.get('end_id', 151645))
+        result['tensor_para_size'] = int(gpt.get('tensor_para_size', 1))
+        result['num_kv_heads'] = int(gpt.get('num_kv_heads', 0))
+        result['max_seq_len'] = int(gpt.get('max_pos_seq_len', 32768))
+
+    # Parse [structure] section for MoE config
+    if 'structure' in config:
+        struct = config['structure']
+        result['expert_num'] = int(struct.get('expert_num', 256))
+        result['moe_k'] = int(struct.get('moe_k', 8))
+        # Parse moe_layers list
+        moe_layers_str = struct.get('moe_layers', '')
+        if moe_layers_str:
+            # Handle format like [0, 1, 2, ...]
+            moe_layers_str = moe_layers_str.strip('[]')
+            moe_layers = [int(x.strip()) for x in moe_layers_str.split(',') if x.strip()]
+            result['moe_layer_index'] = ','.join(str(x) for x in moe_layers)
+
+    return result
+
+
+def apply_config_to_args(args, config):
+    """
+    Apply loaded config to args, but only override defaults (not user-specified values).
+    """
+    if config is None:
+        return
+
+    print("\n" + "=" * 80)
+    print("Loading model configuration from checkpoint config.ini")
+    print("=" * 80)
+
+    # Map config keys to arg names
+    mappings = {
+        'head_num': 'head_num',
+        'size_per_head': 'size_per_head',
+        'hidden_size': 'hidden_size',
+        'inter_size': 'inter_size',
+        'layer_num': 'layer_num',
+        'vocab_size': 'vocab_size',
+        'start_id': 'start_id',
+        'end_id': 'end_id',
+        'tensor_para_size': 'tensor_para_size',
+        'num_kv_heads': 'num_kv_heads',
+        'max_seq_len': 'max_seq_len',
+        'expert_num': 'expert_num',
+        'moe_k': 'moe_k',
+        'moe_layer_index': 'moe_layer_index',
+    }
+
+    for config_key, arg_name in mappings.items():
+        if config_key in config:
+            old_val = getattr(args, arg_name, None)
+            new_val = config[config_key]
+            setattr(args, arg_name, new_val)
+            print(f"  {arg_name}: {old_val} -> {new_val}")
+
+    # Set pipeline_para_size to 1 if tensor_para_size is 1
+    if config.get('tensor_para_size', 1) == 1:
+        args.pipeline_para_size = 1
+        print(f"  pipeline_para_size: -> 1 (single-GPU mode)")
+
+    print("=" * 80 + "\n")
 
 
 @torch.no_grad()
@@ -151,15 +240,16 @@ def main():
     path_group = parser.add_argument_group('Paths')
     path_group.add_argument('--ckpt_path', type=str, required=True,
                            help='Path to Qwen235B MoE checkpoint')
-    path_group.add_argument('--vocab_file', type=str,
-                           default='../models/qwen235b/vocab.json',
-                           help='Vocabulary file')
-    path_group.add_argument('--merges_file', type=str,
-                           default='../models/qwen235b/merges.txt',
-                           help='Merges file')
+    path_group.add_argument('--tokenizer_path', type=str, default=None,
+                           help='Path to HuggingFace tokenizer (defaults to ckpt_path)')
+    # Deprecated arguments for backward compatibility (ignored, use tokenizer_path instead)
+    path_group.add_argument('--vocab_file', type=str, default=None,
+                           help='[DEPRECATED] Use --tokenizer_path instead')
+    path_group.add_argument('--merges_file', type=str, default=None,
+                           help='[DEPRECATED] Use --tokenizer_path instead')
     path_group.add_argument('--lib_path', type=str,
-                           default='./lib/libth_transformer.so',
-                           help='Path to FasterTransformer library')
+                           default='lib/libth_transformer.so',
+                           help='Path to FasterTransformer library (relative to build dir or absolute)')
     path_group.add_argument('--sample_input_file', type=str, default=None,
                            help='Sample input file for prompts')
     path_group.add_argument('--sample_output_file', type=str, default=None,
@@ -167,8 +257,10 @@ def main():
 
     # MoE Token FT configuration
     ft_group = parser.add_argument_group('MoE Token Fault Tolerance')
-    ft_group.add_argument('--enable_moe_ft', action='store_true', default=True,
-                         help='Enable MoE token fault tolerance')
+    ft_group.add_argument('--enable_moe_ft', action='store_true', default=False,
+                         help='Enable MoE token fault tolerance (default: disabled)')
+    ft_group.add_argument('--disable_moe_ft', action='store_true', default=False,
+                         help='Explicitly disable MoE fault tolerance (for clarity)')
     ft_group.add_argument('--moe_checkpoint_interval', type=int, default=1,
                          help='Checkpoint every N tokens (1=every token)')
     ft_group.add_argument('--moe_max_checkpoints', type=int, default=100,
@@ -216,6 +308,19 @@ def main():
 
     args = parser.parse_args()
 
+    # Load config from checkpoint if available
+    ckpt_config = load_config_from_checkpoint(args.ckpt_path)
+    apply_config_to_args(args, ckpt_config)
+
+    # Warn about deprecated arguments
+    if args.vocab_file or args.merges_file:
+        print("\n[WARNING] --vocab_file and --merges_file are deprecated.")
+        print("[WARNING] Using HuggingFace tokenizer from --tokenizer_path or --ckpt_path instead.\n")
+
+    # Handle --disable_moe_ft flag
+    if args.disable_moe_ft:
+        args.enable_moe_ft = False
+
     # Setup MoE FT environment
     setup_moe_ft_environment(args)
 
@@ -250,8 +355,43 @@ def main():
     # Create model
     print(f"\n[Rank {rank}] Initializing Qwen235B MoE model...")
 
-    # Load encoder
-    enc = encoder.get_encoder(args.vocab_file, args.merges_file)
+    # Load tokenizer (use HuggingFace tokenizer for Qwen3)
+    # Try tokenizer_path first, then ckpt_path, then fall back to Qwen model name
+    tokenizer_path = args.tokenizer_path if args.tokenizer_path else args.ckpt_path
+    print(f"[Rank {rank}] Loading tokenizer from: {tokenizer_path}")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    except (ValueError, OSError) as e:
+        # FT checkpoint doesn't have tokenizer files, try common locations
+        fallback_paths = [
+            "/home/victoryang00/Qwen3-30B-A3B",  # Original model
+            "Qwen/Qwen3-30B-A3B",  # HuggingFace hub
+            "Qwen/Qwen2.5-32B",  # Similar tokenizer
+        ]
+        tokenizer = None
+        for fallback in fallback_paths:
+            try:
+                print(f"[Rank {rank}] Trying fallback tokenizer: {fallback}")
+                tokenizer = AutoTokenizer.from_pretrained(fallback, trust_remote_code=True)
+                print(f"[Rank {rank}] Successfully loaded tokenizer from: {fallback}")
+                break
+            except Exception:
+                continue
+
+        if tokenizer is None:
+            print(f"[Rank {rank}] ERROR: Could not load tokenizer. Please specify --tokenizer_path")
+            print(f"[Rank {rank}] Example: --tokenizer_path /path/to/original/Qwen3-30B-A3B")
+            raise e
+
+    # Get correct token IDs from tokenizer if not explicitly set
+    if args.start_id == 151643:  # default value, try to get from tokenizer
+        if hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id is not None:
+            args.start_id = tokenizer.bos_token_id
+    if args.end_id == 151643:  # default value, try to get from tokenizer
+        if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
+            args.end_id = tokenizer.eos_token_id
+    print(f"[Rank {rank}] Using start_id={args.start_id}, end_id={args.end_id}")
 
     # Initialize model
     gpt = ParallelGPT(
@@ -296,15 +436,15 @@ def main():
     else:
         # Default prompts
         contexts = [
+            "Mixture of Experts models are powerful because",
             "The future of artificial intelligence is",
             "In a world where technology advances rapidly,",
-            "Mixture of Experts models are powerful because",
         ] * (args.num_ubatches // 3 + 1)
         contexts = contexts[:args.num_ubatches]
 
     # Build total batch = ubatch_size * num_ubatches
     total_batch = args.ubatch_size * args.num_ubatches
-    base = [torch.IntTensor(enc.encode(c)) for c in contexts]
+    base = [torch.IntTensor(tokenizer.encode(c)) for c in contexts]
     # If not enough prompts provided, cycle defaults to fill the batch
     if len(base) < total_batch:
         reps = (total_batch + len(base) - 1) // len(base)
@@ -376,11 +516,18 @@ def main():
                         print(f"\n... and {len(tokens_batch[0])-3} more outputs")
                         break
 
-                    tokens = tokens[:length].tolist()
-                    output = enc.decode(tokens)
+                    # tokens has shape [beam, seq_len], select first beam and slice to length
+                    length_val = length.item() if hasattr(length, 'item') else int(length)
+                    all_tokens = tokens[0].tolist()
+                    output_tokens = all_tokens[:length_val] if length_val > 0 else all_tokens
+
                     print(f"\nOutput {i+1}:")
-                    print(f"Context: {contexts[i]}")
-                    print(f"Generated: {output}")
+                    print(f"  Context: {contexts[i]}")
+                    print(f"  Output length: {length_val}, Total tokens: {len(all_tokens)}")
+                    print(f"  First 10 tokens: {all_tokens[:10]}")
+
+                    output = tokenizer.decode(output_tokens, skip_special_tokens=True)
+                    print(f"  Generated: {output}")
                     print("-" * 80)
 
             # Print FT statistics if enabled

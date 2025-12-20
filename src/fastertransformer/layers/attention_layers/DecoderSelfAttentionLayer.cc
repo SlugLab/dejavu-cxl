@@ -574,6 +574,21 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
                                       true);
         }
         else {
+            // Debug: check QKV weight pointer before GEMM
+            const T* qkv_kernel = attention_weights->query_weight.kernel;
+            fprintf(stderr, "[FT][DecoderAttn] QKV GEMM: n=%zu batch=%zu k=%zu qkv_ptr=%p\n",
+                    3 * local_hidden_units_, batch_size, d_model_, (void*)qkv_kernel);
+            fflush(stderr);
+
+            // Test if pointer is readable
+            char test_buf[8];
+            cudaError_t test_err = cudaMemcpy(test_buf, qkv_kernel, sizeof(test_buf), cudaMemcpyDeviceToHost);
+            if (test_err != cudaSuccess) {
+                fprintf(stderr, "[FT][DecoderAttn] ERROR: QKV weight pointer invalid! err=%s\n",
+                        cudaGetErrorString(test_err));
+                fflush(stderr);
+            }
+
             cublas_wrapper_->Gemm(CUBLAS_OP_N,
                                   CUBLAS_OP_N,
                                   3 * local_hidden_units_,  // n
