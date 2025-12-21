@@ -90,7 +90,7 @@ set_property(TARGET ParallelGptContextDecoder PROPERTY CUDA_RESOLVE_DEVICE_SYMBO
 target_link_libraries(ParallelGptContextDecoder PUBLIC -lcudart TensorParallelGeluFfnLayer TensorParallelReluFfnLayer TensorParallelSiluFfnLayer
                                                 TensorParallelGptContextAttentionLayer layernorm_kernels
                                                 add_residual_kernels bert_preprocess_kernels nccl_utils gpt_kernels tensor
-                                                nvtx_utils cuda_utils logger)
+                                                nvtx_utils cuda_utils logger moe_delta_checkpoint)
 target_include_directories(ParallelGptContextDecoder BEFORE PUBLIC ${Protobuf_INCLUDE_DIRS})
 
 add_library(ParallelGptDecoder STATIC ParallelGptDecoder.cc)
@@ -98,7 +98,7 @@ set_property(TARGET ParallelGptDecoder PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET ParallelGptDecoder PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
 target_link_libraries(ParallelGptDecoder PUBLIC -lcudart TensorParallelGeluFfnLayer TensorParallelReluFfnLayer TensorParallelSiluFfnLayer
                                                 TensorParallelDecoderSelfAttentionLayer layernorm_kernels
-                                                add_residual_kernels nccl_utils tensor cuda_utils logger)
+                                                add_residual_kernels nccl_utils tensor cuda_utils logger moe_delta_checkpoint)
 target_include_directories(ParallelGptDecoder BEFORE PUBLIC ${Protobuf_INCLUDE_DIRS})
 
 

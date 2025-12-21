@@ -79,6 +79,11 @@ set_property(TARGET moe_token_ft_manager PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET moe_token_ft_manager PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
 target_link_libraries(moe_token_ft_manager PUBLIC -lcudart cuda_utils logger cache_utils)
 
+add_library(moe_delta_checkpoint STATIC moe_delta_checkpoint.cc)
+set_property(TARGET moe_delta_checkpoint PROPERTY POSITION_INDEPENDENT_CODE  ON)
+set_property(TARGET moe_delta_checkpoint PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
+target_link_libraries(moe_delta_checkpoint PUBLIC -lcudart cuda_utils logger)
+
 add_library(cublasINT8MMWrapper STATIC cublasINT8MMWrapper.cc)
 set_property(TARGET cublasINT8MMWrapper PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET cublasINT8MMWrapper PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)

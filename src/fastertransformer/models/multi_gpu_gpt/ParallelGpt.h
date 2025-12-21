@@ -38,6 +38,7 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoder.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptWeight.h"
 #include "src/fastertransformer/utils/custom_ar_comm.h"
+#include "src/fastertransformer/utils/moe_delta_checkpoint.h"
 // #include "src/fastertransformer/utils/cache_utils.h"
 
 namespace fastertransformer {
@@ -121,6 +122,11 @@ private:
     DynamicDecodeLayer<float>*    dynamic_decode_layer_;
     BaseCacheManager*             cache_manager_;
     BaseCacheManager*             recv_cache_manager_;
+
+    // Delta checkpoint support for MoE fault tolerance
+    MoEDeltaCheckpointManager*    delta_checkpoint_manager_ = nullptr;
+    bool                          enable_delta_checkpoint_  = false;
+    bool                          owns_checkpoint_manager_  = false;  // Whether we created the manager
 
     void allocateBuffer() override;
     void allocateBuffer(size_t batch_size,
@@ -285,6 +291,22 @@ public:
 
     void registerCallback(callback_sig* fn, void* ctx);
     void unRegisterCallback();
+
+    // Delta checkpoint support for MoE fault tolerance
+    void enableDeltaCheckpoint(bool enable);
+    void setDeltaCheckpointManager(MoEDeltaCheckpointManager* manager);
+    MoEDeltaCheckpointManager* getDeltaCheckpointManager() const { return delta_checkpoint_manager_; }
+    bool isDeltaCheckpointEnabled() const { return enable_delta_checkpoint_; }
+
+    // Recovery support
+    void setFailureInjectionStep(int step) { failure_injection_step_ = step; }
+    int getFailureInjectionStep() const { return failure_injection_step_; }
+    bool triggerRecovery(int from_step, int ubatch_id);
+    bool isInRecovery() const;
+    int getLastCheckpointStep(int ubatch_id) const;
+
+private:
+    int failure_injection_step_ = -1;  // -1 = disabled
 };
 
 }  // namespace fastertransformer

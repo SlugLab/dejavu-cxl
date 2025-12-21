@@ -23,6 +23,8 @@
 #include <mutex>
 #include <atomic>
 #include <queue>
+#include <string>
+#include <fstream>
 #include "src/fastertransformer/utils/cuda_utils.h"
 
 namespace fastertransformer {
@@ -86,6 +88,11 @@ struct DeltaCheckpointConfig {
     bool enable_activation_delta;           // Enable activation delta checkpointing
     bool enable_compression;                // Enable delta compression
 
+    // File-based checkpoint settings
+    bool enable_file_checkpoint;            // Enable saving checkpoints to files
+    std::string checkpoint_dir;             // Directory for checkpoint files
+    std::string checkpoint_prefix;          // Prefix for checkpoint filenames
+
     DeltaCheckpointConfig()
         : num_layers(48), num_experts(128), moe_k(8),
           hidden_units(2048), size_per_head(128), num_heads(32),
@@ -93,7 +100,44 @@ struct DeltaCheckpointConfig {
           checkpoint_interval(1), max_checkpoints_per_ubatch(100),
           device_pool_size_mb(512), host_buffer_size_mb(128),
           enable_kv_delta(true), enable_activation_delta(true),
-          enable_compression(false) {}
+          enable_compression(false),
+          enable_file_checkpoint(false), checkpoint_dir("/tmp/ft_checkpoints"),
+          checkpoint_prefix("moe_ckpt") {}
+};
+
+// File header for checkpoint files
+struct CheckpointFileHeader {
+    uint32_t magic;                         // Magic number for validation
+    uint32_t version;                       // File format version
+    uint32_t num_checkpoints;               // Number of checkpoints in file
+    uint32_t num_layers;                    // Model configuration
+    uint32_t num_experts;
+    uint32_t moe_k;
+    uint32_t hidden_units;
+    uint32_t size_per_head;
+    uint32_t num_heads;
+    int32_t  max_step;                      // Highest step in this file
+    int32_t  min_step;                      // Lowest step in this file
+    uint64_t total_data_size;               // Total size of checkpoint data
+    uint64_t reserved[4];                   // Reserved for future use
+
+    static constexpr uint32_t MAGIC = 0x4D4F4543;  // "MOEC" - MoE Checkpoint
+    static constexpr uint32_t CURRENT_VERSION = 1;
+};
+
+// Entry header for each checkpoint in the file
+struct CheckpointEntryHeader {
+    int32_t  step;
+    int32_t  layer_id;
+    int32_t  ubatch_id;
+    int32_t  num_tokens;
+    int32_t  seq_offset;
+    uint64_t kv_delta_size;
+    uint64_t activation_delta_size;
+    uint32_t num_expert_indices;
+    uint32_t num_expert_weights;
+    uint64_t timestamp;
+    uint64_t reserved;
 };
 
 // Ring buffer for efficient delta storage
@@ -242,6 +286,37 @@ public:
     // Debug and monitoring
     void printStats() const;
     void dumpCheckpointChain(int ubatch_id, int layer_id) const;
+
+    // File-based checkpoint I/O
+    // Save all checkpoints to a file
+    bool saveCheckpointsToFile(const std::string& filepath);
+
+    // Save checkpoints up to a specific step
+    bool saveCheckpointsToFile(const std::string& filepath, int max_step);
+
+    // Load checkpoints from a file
+    bool loadCheckpointsFromFile(const std::string& filepath);
+
+    // Load and recover from a file to a specific step
+    bool loadAndRecoverFromFile(const std::string& filepath, int target_step, int ubatch_id);
+
+    // Get the default checkpoint filepath for a step
+    std::string getCheckpointFilepath(int step) const;
+
+    // Auto-save checkpoint to file (called after each checkpoint if enabled)
+    void autoSaveCheckpoint(int step);
+
+    // Check if a checkpoint file exists
+    bool checkpointFileExists(const std::string& filepath) const;
+
+    // Get metadata from a checkpoint file without loading data
+    bool getCheckpointFileInfo(const std::string& filepath, CheckpointFileHeader& header) const;
+
+private:
+    // File I/O helpers
+    bool writeCheckpointEntry(std::ofstream& file, const MoEDeltaCheckpoint* checkpoint);
+    bool readCheckpointEntry(std::ifstream& file, MoEDeltaCheckpoint* checkpoint);
+    void ensureCheckpointDir();
 };
 
 // Integration helper for FFN layer

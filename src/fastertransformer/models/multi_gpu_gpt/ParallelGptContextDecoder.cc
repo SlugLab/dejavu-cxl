@@ -995,6 +995,30 @@ void ParallelGptContextDecoder<T>::forward(
             ffn_layer_->resetInterSize(inter_size_ / tensor_para_.world_size_);
             ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
 
+            // Delta checkpoint after MoE computation
+            // Note: Delta checkpoint integration requires proper initialization via
+            // setDeltaCheckpointManager() and enableDeltaCheckpoint() before use.
+            // The checkpoint will save expert routing and KV cache deltas.
+            if (use_moe && enable_delta_checkpoint_ && delta_checkpoint_manager_ != nullptr
+                && delta_checkpoint_helper_.isEnabled()) {
+                delta_checkpoint_helper_.setLayer(l);
+                // Note: expert_scales_ is T*, checkpointMoEOutput expects float* for weights
+                // For now, pass nullptr for expert_weights until proper type conversion is added
+                delta_checkpoint_helper_.checkpointMoEOutput(
+                    current_generation_step_,
+                    ubatch_id,
+                    k_cache_ptr,                          // key cache for this layer
+                    v_cache_ptr,                          // value cache for this layer
+                    0,                                    // seq_start (full prompt)
+                    seq_len,                              // seq_end
+                    expert_for_source_row_,               // expert indices
+                    nullptr,                              // expert weights (TODO: convert T* to float*)
+                    fc2_result_,                          // MoE output
+                    h_token_num,                          // num tokens
+                    local_batch_size,                     // batch size
+                    stream_);
+            }
+
             // the adapter after ffn (only pre layernorm currently)
             PUSH_RANGE("post ffn");
             if (has_adapters_) {
@@ -1074,14 +1098,21 @@ void ParallelGptContextDecoder<T>::forward(
                 }
             }
             else {
+                // NOTE: For MoE models with shared output bias (like Qwen3), the bias is [hidden_units]
+                // not [num_experts, hidden_units]. The finalize_moe_routing_kernel expects per-expert
+                // bias, so we pass nullptr and apply the shared bias separately afterward.
+                // This fixes CUDA illegal memory access with expert_idx * cols out of bounds.
+                const T* shared_moe_bias = has_adapters_ ?
+                    layer_weight->after_ffn_adapter_weights.output_weight.bias :
+                    layer_weight->ffn_weights.output_weight.bias;
+
                 if (layernorm_type_ == LayerNormType::pre_layernorm) {
+                    // Pass nullptr for bias - we'll apply shared bias separately
                     finalize_moe_routing_kernelLauncher(fc2_result_,
                                                         decoder_output,
                                                         after_adapter_attn_output_,
                                                         has_adapters_ ? ffn_output_ptr : nullptr,
-                                                        has_adapters_ ?
-                                                            layer_weight->after_ffn_adapter_weights.output_weight.bias :
-                                                            layer_weight->ffn_weights.output_weight.bias,
+                                                        (const T*)nullptr,  // nullptr for per-expert bias
                                                         expert_scales_,
                                                         expanded_source_row_to_expanded_dest_row_,
                                                         expert_for_source_row_,
@@ -1089,14 +1120,21 @@ void ParallelGptContextDecoder<T>::forward(
                                                         hidden_units_,
                                                         moe_k_,
                                                         stream_);
+                    // Apply shared MoE output bias if it exists
+                    if (shared_moe_bias != nullptr) {
+                        invokeAddBias(decoder_output,
+                                      shared_moe_bias,
+                                      h_token_num,
+                                      hidden_units_,
+                                      stream_);
+                    }
                 }
                 else if (layernorm_type_ == LayerNormType::post_layernorm) {
+                    // For post_layernorm, pass nullptr for bias and apply after
                     finalize_moe_routing_kernelLauncher(fc2_result_,
                                                         decoder_output,
                                                         after_adapter_attn_output_,
-                                                        has_adapters_ ?
-                                                            layer_weight->after_ffn_adapter_weights.output_weight.bias :
-                                                            layer_weight->ffn_weights.output_weight.bias,
+                                                        (const T*)nullptr,  // nullptr for per-expert bias
                                                         expert_scales_,
                                                         expanded_source_row_to_expanded_dest_row_,
                                                         expert_for_source_row_,
@@ -1104,6 +1142,14 @@ void ParallelGptContextDecoder<T>::forward(
                                                         hidden_units_,
                                                         moe_k_,
                                                         stream_);
+                    // Apply shared MoE output bias if it exists
+                    if (shared_moe_bias != nullptr) {
+                        invokeAddBias(decoder_output,
+                                      shared_moe_bias,
+                                      h_token_num,
+                                      hidden_units_,
+                                      stream_);
+                    }
                     // Use opt_version=0 for RMSNorm (nullptr beta)
                     invokeGeneralLayerNorm(decoder_output,
                                            decoder_output,
@@ -1200,6 +1246,43 @@ void ParallelGptContextDecoder<T>::forward(
     std::chrono::duration<double, std::milli> ms_temp = endt - startt;
 
     FT_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
+}
+
+template<typename T>
+void ParallelGptContextDecoder<T>::setDeltaCheckpointManager(MoEDeltaCheckpointManager* manager)
+{
+    delta_checkpoint_manager_ = manager;
+    delta_checkpoint_helper_ = MoECheckpointHelper(manager);
+}
+
+template<typename T>
+void ParallelGptContextDecoder<T>::enableDeltaCheckpoint(bool enable)
+{
+    enable_delta_checkpoint_ = enable;
+    delta_checkpoint_helper_.setEnabled(enable);
+    if (enable && delta_checkpoint_manager_) {
+        FT_LOG_INFO("Delta checkpoint enabled for context decoder");
+    }
+}
+
+template<typename T>
+bool ParallelGptContextDecoder<T>::initiateRecovery(int target_step, int ubatch_id)
+{
+    if (delta_checkpoint_manager_ == nullptr) {
+        FT_LOG_WARNING("Cannot initiate recovery: delta checkpoint manager not set");
+        return false;
+    }
+    FT_LOG_INFO("Initiating recovery to step %d for ubatch %d", target_step, ubatch_id);
+    return delta_checkpoint_manager_->initiateRecovery(target_step, ubatch_id);
+}
+
+template<typename T>
+void ParallelGptContextDecoder<T>::completeRecovery()
+{
+    if (delta_checkpoint_manager_) {
+        delta_checkpoint_manager_->completeRecovery();
+        FT_LOG_INFO("Recovery completed");
+    }
 }
 
 template class ParallelGptContextDecoder<float>;

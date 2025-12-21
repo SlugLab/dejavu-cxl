@@ -29,6 +29,8 @@
 #include "src/fastertransformer/utils/cublasMMWrapper.h"
 #include "src/fastertransformer/utils/custom_ar_comm.h"
 #include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/utils/moe_delta_checkpoint.h"
+
 namespace fastertransformer {
 
 template<typename T>
@@ -86,6 +88,12 @@ private:
     bool isLastLayerParallelId(uint l);
     int  getFirstLayerParallelId();
 
+    // Delta checkpoint for MoE fault tolerance
+    MoEDeltaCheckpointManager* delta_checkpoint_manager_ = nullptr;
+    MoECheckpointHelper        delta_checkpoint_helper_;
+    bool                       enable_delta_checkpoint_ = false;
+    int                        current_generation_step_ = 0;
+
 protected:
     int int8_mode_ = 0;
 
@@ -119,6 +127,14 @@ public:
     void forward(std::unordered_map<std::string, Tensor>*              output_tensors,
                  const std::unordered_map<std::string, Tensor>*        input_tensors,
                  const std::vector<ParallelGptDecoderLayerWeight<T>*>* decoder_layer_weights);
+
+    // Delta checkpoint methods for MoE fault tolerance
+    void setDeltaCheckpointManager(MoEDeltaCheckpointManager* manager);
+    void enableDeltaCheckpoint(bool enable);
+    void setGenerationStep(int step) { current_generation_step_ = step; }
+    bool isInRecovery() const { return delta_checkpoint_manager_ && delta_checkpoint_manager_->isInRecovery(); }
+    bool initiateRecovery(int target_step, int ubatch_id);
+    void completeRecovery();
 };
 
 }  // namespace fastertransformer

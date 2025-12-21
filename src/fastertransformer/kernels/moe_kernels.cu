@@ -890,6 +890,9 @@ void initialize_moe_routing_kernelLauncher(const T*     unpermuted_input,
 
 // Final kernel to unpermute and scale
 // This kernel unpermutes the original data, does the k-way reduction and performs the final skip connection.
+// NOTE: bias can be nullptr for models with shared output bias (like Qwen3 MoE) - in that case,
+// the shared bias should be applied separately after this kernel.
+// When bias is non-null, it is expected to have shape [num_experts, cols] for per-expert bias.
 template<typename T, int RESIDUAL_NUM>
 __global__ void finalize_moe_routing_kernel(const T*   expanded_permuted_rows,
                                             T*         reduced_unpermuted_output,
@@ -928,10 +931,15 @@ __global__ void finalize_moe_routing_kernel(const T*   expanded_permuted_rows,
             const T       row_scale                      = scales[k_offset];
             const T*      expanded_permuted_rows_row_ptr = expanded_permuted_rows + expanded_permuted_row * cols;
 
-            const int expert_idx = expert_for_source_row[k_offset];
-            const T*  bias_ptr   = bias + expert_idx * cols;
-
-            thread_output = thread_output + row_scale * (expanded_permuted_rows_row_ptr[tid] + bias_ptr[tid]);
+            // Handle nullptr bias for models with shared output bias (like Qwen3 MoE)
+            if (bias != nullptr) {
+                const int expert_idx = expert_for_source_row[k_offset];
+                const T*  bias_ptr   = bias + expert_idx * cols;
+                thread_output = thread_output + row_scale * (expanded_permuted_rows_row_ptr[tid] + bias_ptr[tid]);
+            }
+            else {
+                thread_output = thread_output + row_scale * expanded_permuted_rows_row_ptr[tid];
+            }
         }
         reduced_row_ptr[tid] = thread_output;
     }

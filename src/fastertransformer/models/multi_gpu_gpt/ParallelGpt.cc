@@ -453,6 +453,11 @@ ParallelGpt<T>::~ParallelGpt()
     delete gpt_decoder_;
     delete gpt_context_decoder_;
     delete dynamic_decode_layer_;
+    // Clean up delta checkpoint manager if we own it
+    if (owns_checkpoint_manager_ && delta_checkpoint_manager_ != nullptr) {
+        delete delta_checkpoint_manager_;
+        delta_checkpoint_manager_ = nullptr;
+    }
     freeBuffer();
 }
 
@@ -589,6 +594,95 @@ void ParallelGpt<T>::unRegisterCallback()
 {
     token_generated_cb_  = nullptr;
     token_generated_ctx_ = nullptr;
+}
+
+template<typename T>
+void ParallelGpt<T>::enableDeltaCheckpoint(bool enable)
+{
+    enable_delta_checkpoint_ = enable;
+    printf("[FT][ParallelGpt] enableDeltaCheckpoint(%s), context_decoder=%p, decoder=%p\n",
+           enable ? "true" : "false", (void*)gpt_context_decoder_, (void*)gpt_decoder_);
+    // Propagate to both decoders
+    if (gpt_context_decoder_ != nullptr) {
+        gpt_context_decoder_->enableDeltaCheckpoint(enable);
+    }
+    if (gpt_decoder_ != nullptr) {
+        gpt_decoder_->enableDeltaCheckpoint(enable);
+    }
+}
+
+template<typename T>
+void ParallelGpt<T>::setDeltaCheckpointManager(MoEDeltaCheckpointManager* manager)
+{
+    delta_checkpoint_manager_ = manager;
+    printf("[FT][ParallelGpt] setDeltaCheckpointManager(%p), context_decoder=%p, decoder=%p\n",
+           (void*)manager, (void*)gpt_context_decoder_, (void*)gpt_decoder_);
+    // Propagate to both decoders
+    if (gpt_context_decoder_ != nullptr) {
+        gpt_context_decoder_->setDeltaCheckpointManager(manager);
+    }
+    if (gpt_decoder_ != nullptr) {
+        gpt_decoder_->setDeltaCheckpointManager(manager);
+    }
+}
+
+template<typename T>
+bool ParallelGpt<T>::triggerRecovery(int from_step, int ubatch_id)
+{
+    printf("[FT][Recovery] triggerRecovery called: from_step=%d, ubatch_id=%d\n", from_step, ubatch_id);
+
+    if (delta_checkpoint_manager_ == nullptr) {
+        printf("[FT][Recovery] Cannot trigger recovery: no checkpoint manager\n");
+        return false;
+    }
+
+    // Get the latest checkpoint step for this microbatch
+    int latest_ckpt_step = delta_checkpoint_manager_->getLatestCheckpointStep(ubatch_id);
+    printf("[FT][Recovery] Latest checkpoint step for ubatch %d: %d\n", ubatch_id, latest_ckpt_step);
+
+    if (latest_ckpt_step < 0) {
+        printf("[FT][Recovery] Cannot trigger recovery: no checkpoint available for ubatch %d\n", ubatch_id);
+        return false;
+    }
+
+    // Target the latest checkpoint before the failure step
+    int target_step = (latest_ckpt_step < from_step) ? latest_ckpt_step : from_step - 1;
+    if (target_step < 0) {
+        target_step = 0;
+    }
+
+    printf("[FT][Recovery] Triggering recovery from step %d to step %d for ubatch %d\n", from_step, target_step, ubatch_id);
+
+    // Initiate recovery in the checkpoint manager
+    bool recovery_started = delta_checkpoint_manager_->initiateRecovery(target_step, ubatch_id);
+    if (!recovery_started) {
+        printf("[FT][Recovery] Failed to initiate recovery for ubatch %d to step %d\n", ubatch_id, target_step);
+        return false;
+    }
+
+    // Update the generation step
+    step_ = target_step;
+
+    printf("[FT][Recovery] Recovery initiated successfully, step reset to %d\n", step_);
+    return true;
+}
+
+template<typename T>
+bool ParallelGpt<T>::isInRecovery() const
+{
+    if (delta_checkpoint_manager_ == nullptr) {
+        return false;
+    }
+    return delta_checkpoint_manager_->isInRecovery();
+}
+
+template<typename T>
+int ParallelGpt<T>::getLastCheckpointStep(int ubatch_id) const
+{
+    if (delta_checkpoint_manager_ == nullptr) {
+        return -1;
+    }
+    return delta_checkpoint_manager_->getLatestCheckpointStep(ubatch_id);
 }
 
 template<typename T>
@@ -1221,6 +1315,9 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                   Tensor(MEMORY_GPU, data_type, {batch_size * beam_width, hidden_units_}, decoder_output_buf_)}});
 
             auto startp = high_resolution_clock::now();
+            // Set generation step for context decoder checkpointing
+            // Use max_input_length as this is the step where prefill ends
+            gpt_context_decoder_->setGenerationStep(max_input_length);
             gpt_context_decoder_->forward(
                 &decoder_output_tensors, &decoder_input_tensors, &gpt_weights->decoder_layer_weights);
             gpu_sync(stream_);
@@ -1363,12 +1460,54 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
         microbatch_should_stop_[microbatch] = false;
     }
 
+    // Load checkpoints from file if specified
+    if (enable_delta_checkpoint_ && delta_checkpoint_manager_ != nullptr) {
+        const char* load_ckpt_env = std::getenv("LOAD_CHECKPOINT_FILE");
+        if (load_ckpt_env != nullptr) {
+            std::string filepath = std::string(load_ckpt_env);
+            printf("[FT][Checkpoint] Loading checkpoints from file: %s\n", filepath.c_str());
+            if (delta_checkpoint_manager_->loadCheckpointsFromFile(filepath)) {
+                printf("[FT][Checkpoint] Successfully loaded checkpoints from file\n");
+            } else {
+                printf("[FT][Checkpoint] Failed to load checkpoints from file\n");
+            }
+        }
+    }
+
     std::vector<std::string> req_times;
 
     auto total_startt = high_resolution_clock::now();
     for (step_ = step_start; step_ < (int)gen_len; step_++) {
 
         printf("********************************* Start with step %d, gen_len is %d\n", step_, (int)gen_len);
+
+        // Check for failure injection (for recovery testing)
+        printf("[FT][Recovery] Checking failure injection: step=%d, failure_step=%d, in_recovery=%d\n",
+               step_, failure_injection_step_, isInRecovery() ? 1 : 0);
+
+        if (failure_injection_step_ >= 0 && step_ == failure_injection_step_ && !isInRecovery()) {
+            printf("[FT][Recovery] *** INJECTING FAILURE at step %d ***\n", step_);
+
+            // Trigger recovery from the last checkpoint
+            // For testing, we recover all microbatches (ubatch_id = 0)
+            auto recovery_start = high_resolution_clock::now();
+            bool recovery_success = triggerRecovery(step_, 0 /* ubatch_id */);
+            auto recovery_end = high_resolution_clock::now();
+            double recovery_time_ms = duration<double, std::milli>(recovery_end - recovery_start).count();
+
+            if (recovery_success) {
+                printf("[FT][Recovery] Recovery completed in %.2f ms, resuming from step %d\n", recovery_time_ms, step_);
+                // Complete recovery and continue from the restored step
+                if (delta_checkpoint_manager_ != nullptr) {
+                    delta_checkpoint_manager_->completeRecovery();
+                }
+                // Disable further failure injection after recovery
+                failure_injection_step_ = -1;
+            } else {
+                printf("[FT][Recovery] Recovery FAILED at step %d, continuing with normal generation\n", step_);
+                failure_injection_step_ = -1;
+            }
+        }
 
         // if necessary.
         const bool fill_caches_only = (continue_gen) && (step_ < max_context_len);
@@ -1530,6 +1669,8 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                      {"key_cache", *key_cache_ret},
                      {"value_cache", *value_cache_ret}});
 
+                // Set the generation step before calling forward so checkpointing uses correct step
+                gpt_decoder_->setGenerationStep(step_);
                 gpt_decoder_->forward(
                     &decoder_output_tensors, &decoder_input_tensors, &gpt_weights->decoder_layer_weights);
             }
@@ -1850,6 +1991,16 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
             printf("[BENCHMARK] RANK %d, TOTAL TOKEN generation took %f ms\n", myRank, ms_double.count());
         } else {
             printf("[BENCHMARK] TOTAL TOKEN generation took %f ms\n", ms_double.count());
+        }
+    }
+
+    // Save checkpoints to file if enabled
+    if (enable_delta_checkpoint_ && delta_checkpoint_manager_ != nullptr) {
+        const char* save_ckpt_env = std::getenv("SAVE_CHECKPOINT_FILE");
+        if (save_ckpt_env != nullptr) {
+            std::string filepath = std::string(save_ckpt_env);
+            printf("[FT][Checkpoint] Saving checkpoints to file: %s\n", filepath.c_str());
+            delta_checkpoint_manager_->saveCheckpointsToFile(filepath);
         }
     }
 

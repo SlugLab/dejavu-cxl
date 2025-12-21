@@ -82,6 +82,10 @@ public:
     cudaStream_t*                         stream_ = NULL;
     ft::Allocator<ft::AllocatorType::TH>* allocator;
 
+    // Delta checkpoint support for MoE fault tolerance
+    ft::MoEDeltaCheckpointManager* delta_checkpoint_manager_ = nullptr;
+    bool                           owns_checkpoint_manager_  = false;
+
     FTGpt(const int64_t              head_num,
           const int64_t              size_per_head,
           const int64_t              inter_size,
@@ -368,6 +372,12 @@ public:
 
         delete cublas_algo_map_;
         delete cublas_wrapper_mutex_;
+
+        // Clean up delta checkpoint manager if we own it
+        if (owns_checkpoint_manager_ && delta_checkpoint_manager_ != nullptr) {
+            delete delta_checkpoint_manager_;
+            delta_checkpoint_manager_ = nullptr;
+        }
     }
 
     void cleanup() override
@@ -700,7 +710,144 @@ public:
                                              0,
                                              shared_contexts_ratio_,
                                              hidden_size_);
+
+            // Check for delta checkpoint environment variable and enable if set
+            const char* enable_ckpt_env = std::getenv("ENABLE_DELTA_CHECKPOINT");
+            if (enable_ckpt_env != nullptr && std::string(enable_ckpt_env) == "1") {
+                printf("[FT][ParallelGptOp] Delta checkpoint enabled via environment variable\n");
+
+                // Create a checkpoint manager if not already created
+                if (delta_checkpoint_manager_ == nullptr) {
+                    // Get checkpoint configuration from environment
+                    int checkpoint_interval = 1;
+                    int max_checkpoints = 100;
+                    size_t pool_size_mb = 512;  // 512MB default
+
+                    const char* interval_env = std::getenv("DELTA_CHECKPOINT_INTERVAL");
+                    if (interval_env != nullptr) {
+                        checkpoint_interval = std::stoi(interval_env);
+                    }
+                    const char* max_ckpts_env = std::getenv("DELTA_MAX_CHECKPOINTS");
+                    if (max_ckpts_env != nullptr) {
+                        max_checkpoints = std::stoi(max_ckpts_env);
+                    }
+
+                    // Build checkpoint config
+                    ft::DeltaCheckpointConfig ckpt_config;
+                    ckpt_config.num_layers = layer_num_;
+                    ckpt_config.num_experts = expert_num_;
+                    ckpt_config.moe_k = moe_k_;
+                    ckpt_config.hidden_units = hidden_size_ > 0 ? hidden_size_ : head_num_ * size_per_head_;
+                    ckpt_config.size_per_head = size_per_head_;
+                    ckpt_config.num_heads = head_num_;
+                    ckpt_config.max_seq_len = total_output_len;
+                    ckpt_config.max_batch_size = request_batch_size;
+                    ckpt_config.checkpoint_interval = checkpoint_interval;
+                    ckpt_config.max_checkpoints_per_ubatch = max_checkpoints;
+                    ckpt_config.device_pool_size_mb = pool_size_mb;
+                    ckpt_config.host_buffer_size_mb = pool_size_mb / 2;
+                    ckpt_config.enable_kv_delta = true;
+                    ckpt_config.enable_activation_delta = true;
+                    ckpt_config.enable_compression = false;
+
+                    delta_checkpoint_manager_ = new ft::MoEDeltaCheckpointManager(ckpt_config);
+                    owns_checkpoint_manager_ = true;
+                    printf("[FT][ParallelGptOp] Created delta checkpoint manager: interval=%d, max_ckpts=%d, pool=%zuMB\n",
+                           checkpoint_interval, max_checkpoints, pool_size_mb);
+                }
+
+                gpt_ptr->setDeltaCheckpointManager(delta_checkpoint_manager_);
+                gpt_ptr->enableDeltaCheckpoint(true);
+
+                // Check for failure injection (for recovery testing)
+                const char* enable_recovery_env = std::getenv("ENABLE_RECOVERY_TEST");
+                if (enable_recovery_env != nullptr && std::string(enable_recovery_env) == "1") {
+                    const char* failure_step_env = std::getenv("INJECT_FAILURE_STEP");
+                    if (failure_step_env != nullptr) {
+                        int failure_step = std::stoi(failure_step_env);
+                        gpt_ptr->setFailureInjectionStep(failure_step);
+                        printf("[FT][ParallelGptOp] Recovery test enabled, failure injection at step %d\n", failure_step);
+                    }
+                }
+            }
 #endif
+        }
+
+        // Check for delta checkpoint environment variable and enable if set
+        // This code is OUTSIDE the conditional blocks so it applies to all gpt_ptr types
+        const char* enable_ckpt_env = std::getenv("ENABLE_DELTA_CHECKPOINT");
+        if (enable_ckpt_env != nullptr && std::string(enable_ckpt_env) == "1") {
+            printf("[FT][ParallelGptOp] Delta checkpoint enabled via environment variable\n");
+
+            // Create a checkpoint manager if not already created
+            if (delta_checkpoint_manager_ == nullptr) {
+                // Get checkpoint configuration from environment
+                int checkpoint_interval = 1;
+                int max_checkpoints = 100;
+                size_t pool_size_mb = 512;  // 512MB default
+
+                const char* interval_env = std::getenv("DELTA_CHECKPOINT_INTERVAL");
+                if (interval_env != nullptr) {
+                    checkpoint_interval = std::stoi(interval_env);
+                }
+                const char* max_ckpts_env = std::getenv("DELTA_MAX_CHECKPOINTS");
+                if (max_ckpts_env != nullptr) {
+                    max_checkpoints = std::stoi(max_ckpts_env);
+                }
+
+                // Build checkpoint config
+                ft::DeltaCheckpointConfig ckpt_config;
+                ckpt_config.num_layers = layer_num_;
+                ckpt_config.num_experts = expert_num_;
+                ckpt_config.moe_k = moe_k_;
+                ckpt_config.hidden_units = hidden_size_ > 0 ? hidden_size_ : head_num_ * size_per_head_;
+                ckpt_config.size_per_head = size_per_head_;
+                ckpt_config.num_heads = head_num_;
+                ckpt_config.max_seq_len = total_output_len;
+                ckpt_config.max_batch_size = request_batch_size;
+                ckpt_config.checkpoint_interval = checkpoint_interval;
+                ckpt_config.max_checkpoints_per_ubatch = max_checkpoints;
+                ckpt_config.device_pool_size_mb = pool_size_mb;
+                ckpt_config.host_buffer_size_mb = pool_size_mb / 2;
+                ckpt_config.enable_kv_delta = true;
+                ckpt_config.enable_activation_delta = true;
+                ckpt_config.enable_compression = false;
+
+                // File-based checkpoint settings
+                const char* enable_file_ckpt_env = std::getenv("ENABLE_FILE_CHECKPOINT");
+                if (enable_file_ckpt_env != nullptr && std::string(enable_file_ckpt_env) == "1") {
+                    ckpt_config.enable_file_checkpoint = true;
+                    const char* ckpt_dir_env = std::getenv("CHECKPOINT_DIR");
+                    if (ckpt_dir_env != nullptr) {
+                        ckpt_config.checkpoint_dir = std::string(ckpt_dir_env);
+                    }
+                    const char* ckpt_prefix_env = std::getenv("CHECKPOINT_PREFIX");
+                    if (ckpt_prefix_env != nullptr) {
+                        ckpt_config.checkpoint_prefix = std::string(ckpt_prefix_env);
+                    }
+                    printf("[FT][ParallelGptOp] File checkpoint enabled: dir=%s, prefix=%s\n",
+                           ckpt_config.checkpoint_dir.c_str(), ckpt_config.checkpoint_prefix.c_str());
+                }
+
+                delta_checkpoint_manager_ = new ft::MoEDeltaCheckpointManager(ckpt_config);
+                owns_checkpoint_manager_ = true;
+                printf("[FT][ParallelGptOp] Created delta checkpoint manager: interval=%d, max_ckpts=%d, pool=%zuMB\n",
+                       checkpoint_interval, max_checkpoints, pool_size_mb);
+            }
+
+            gpt_ptr->setDeltaCheckpointManager(delta_checkpoint_manager_);
+            gpt_ptr->enableDeltaCheckpoint(true);
+
+            // Check for failure injection (for recovery testing)
+            const char* enable_recovery_env = std::getenv("ENABLE_RECOVERY_TEST");
+            if (enable_recovery_env != nullptr && std::string(enable_recovery_env) == "1") {
+                const char* failure_step_env = std::getenv("INJECT_FAILURE_STEP");
+                if (failure_step_env != nullptr) {
+                    int failure_step = std::stoi(failure_step_env);
+                    gpt_ptr->setFailureInjectionStep(failure_step);
+                    printf("[FT][ParallelGptOp] Recovery test enabled, failure injection at step %d\n", failure_step);
+                }
+            }
         }
 
         std::vector<uint32_t> output_seq_len(request_batch_size, total_output_len);

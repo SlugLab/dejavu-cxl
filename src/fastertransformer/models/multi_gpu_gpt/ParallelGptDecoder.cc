@@ -556,6 +556,60 @@ namespace fastertransformer
 
             ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
 
+            // Delta checkpoint after MoE computation for token generation
+            // Note: Delta checkpoint integration requires proper initialization via
+            // setDeltaCheckpointManager() and enableDeltaCheckpoint() before use.
+
+            // Debug: log checkpoint conditions for first layer
+            if (l == 0 && ite == 0 && enable_delta_checkpoint_) {
+                printf("[FT][Decoder] layer 0: use_moe=%d, moe_layer_index_size=%zu, "
+                       "enable_ckpt=%d, manager=%p, helper_enabled=%d\n",
+                       use_moe, moe_layer_index_.size(),
+                       enable_delta_checkpoint_,
+                       (void*)delta_checkpoint_manager_,
+                       delta_checkpoint_helper_.isEnabled());
+            }
+
+            if (use_moe) {
+                if (enable_delta_checkpoint_ && delta_checkpoint_manager_ != nullptr
+                    && delta_checkpoint_helper_.isEnabled()) {
+                    // Use current_generation_step_ which is set by setGenerationStep() from main loop
+                    // This ensures checkpoint step matches the main generation loop step (e.g., 8, 9, 10...)
+                    // rather than the decoder-local step from input tensors
+                    int step = current_generation_step_;
+                    bool should_ckpt = delta_checkpoint_manager_->shouldCheckpoint(step);
+
+                    // Log for first MoE layer per step
+                    if (ite == 0) {
+                        printf("[FT][Decoder] MoE layer %d, step=%d (gen_step): should_checkpoint=%d\n",
+                               l, step, should_ckpt);
+                    }
+
+                    delta_checkpoint_helper_.setLayer(l);
+                    // Note: expert_scales_ is T*, checkpointMoEOutput expects float* for weights
+                    // For now, pass nullptr for expert_weights until proper type conversion is added
+                    // seq_start should be max(0, step-1) to avoid negative offset
+                    int seq_start = (step > 0) ? step - 1 : 0;
+                    delta_checkpoint_helper_.checkpointMoEOutput(
+                        step,
+                        ite,                                   // ubatch_id
+                        k_cache.getPtrWithOffset<T>(cache_offset),  // key cache
+                        v_cache.getPtrWithOffset<T>(cache_offset),  // value cache
+                        seq_start,                             // seq_start (previous position, min 0)
+                        step + 1,                              // seq_end (current position + 1)
+                        expert_for_source_row_,                // expert indices
+                        nullptr,                               // expert weights (TODO: convert T* to float*)
+                        fc2_result_,                           // MoE output
+                        local_batch_size,                      // num tokens
+                        local_batch_size,                      // batch size
+                        stream_);
+
+                    if (should_ckpt && l == 0 && ite == 0) {
+                        FT_LOG_INFO("Delta checkpoint created at step %d", step);
+                    }
+                }
+            }
+
             // the adapter after ffn
             PUSH_RANGE("post ffn");
             if (has_adapters_)
@@ -639,13 +693,22 @@ namespace fastertransformer
             }
             else
             {
+                // NOTE: For MoE models with shared output bias (like Qwen3), the bias is [hidden_units]
+                // not [num_experts, hidden_units]. The finalize_moe_routing_kernel expects per-expert
+                // bias, so we pass nullptr and apply the shared bias separately afterward.
+                // This fixes CUDA illegal memory access with expert_idx * cols out of bounds.
+                const T* shared_moe_bias = has_adapters_ ?
+                    layer_weight->after_ffn_adapter_weights.output_weight.bias :
+                    layer_weight->ffn_weights.output_weight.bias;
+
                 if (layernorm_type_ == LayerNormType::pre_layernorm)
                 {
+                    // Pass nullptr for bias - we'll apply shared bias separately
                     finalize_moe_routing_kernelLauncher(fc2_result_,
                                                         decoder_output,
                                                         after_adapter_attn_output_,
                                                         has_adapters_ ? ffn_output_ptr : nullptr,
-                                                        has_adapters_ ? layer_weight->after_ffn_adapter_weights.output_weight.bias : layer_weight->ffn_weights.output_weight.bias,
+                                                        (const T*)nullptr,  // nullptr for per-expert bias
                                                         expert_scales_,
                                                         expanded_source_row_to_expanded_dest_row_,
                                                         expert_for_source_row_,
@@ -653,13 +716,22 @@ namespace fastertransformer
                                                         hidden_units_,
                                                         moe_k_,
                                                         stream_);
+                    // Apply shared MoE output bias if it exists
+                    if (shared_moe_bias != nullptr) {
+                        invokeAddBias(decoder_output,
+                                      shared_moe_bias,
+                                      local_batch_size,
+                                      hidden_units_,
+                                      stream_);
+                    }
                 }
                 else if (layernorm_type_ == LayerNormType::post_layernorm)
                 {
+                    // For post_layernorm, pass nullptr for bias and apply after
                     finalize_moe_routing_kernelLauncher(fc2_result_,
                                                         decoder_output,
                                                         after_adapter_attn_output_,
-                                                        has_adapters_ ? layer_weight->after_ffn_adapter_weights.output_weight.bias : layer_weight->ffn_weights.output_weight.bias,
+                                                        (const T*)nullptr,  // nullptr for per-expert bias
                                                         expert_scales_,
                                                         expanded_source_row_to_expanded_dest_row_,
                                                         expert_for_source_row_,
@@ -667,6 +739,14 @@ namespace fastertransformer
                                                         hidden_units_,
                                                         moe_k_,
                                                         stream_);
+                    // Apply shared MoE output bias if it exists
+                    if (shared_moe_bias != nullptr) {
+                        invokeAddBias(decoder_output,
+                                      shared_moe_bias,
+                                      local_batch_size,
+                                      hidden_units_,
+                                      stream_);
+                    }
                     // Use opt_version=0 for RMSNorm (nullptr beta)
                     invokeGeneralLayerNorm(decoder_output,
                                            decoder_output,
@@ -701,6 +781,45 @@ namespace fastertransformer
         if (is_free_buffer_after_forward_ == true)
         {
             freeBuffer();
+        }
+    }
+
+    template<typename T>
+    void ParallelGptDecoder<T>::setDeltaCheckpointManager(MoEDeltaCheckpointManager* manager)
+    {
+        delta_checkpoint_manager_ = manager;
+        delta_checkpoint_helper_ = MoECheckpointHelper(manager);
+        printf("[FT][ParallelGptDecoder] checkpoint manager set to %p\n", (void*)manager);
+    }
+
+    template<typename T>
+    void ParallelGptDecoder<T>::enableDeltaCheckpoint(bool enable)
+    {
+        enable_delta_checkpoint_ = enable;
+        delta_checkpoint_helper_.setEnabled(enable);
+        printf("[FT][ParallelGptDecoder] delta checkpoint %s, helper enabled=%d, manager=%p\n",
+               enable ? "ENABLED" : "disabled",
+               delta_checkpoint_helper_.isEnabled(),
+               (void*)delta_checkpoint_manager_);
+    }
+
+    template<typename T>
+    bool ParallelGptDecoder<T>::initiateRecovery(int target_step, int ubatch_id)
+    {
+        if (delta_checkpoint_manager_ == nullptr) {
+            FT_LOG_WARNING("Cannot initiate recovery: delta checkpoint manager not set");
+            return false;
+        }
+        FT_LOG_INFO("Initiating recovery to step %d for ubatch %d", target_step, ubatch_id);
+        return delta_checkpoint_manager_->initiateRecovery(target_step, ubatch_id);
+    }
+
+    template<typename T>
+    void ParallelGptDecoder<T>::completeRecovery()
+    {
+        if (delta_checkpoint_manager_) {
+            delta_checkpoint_manager_->completeRecovery();
+            FT_LOG_INFO("Recovery completed");
         }
     }
 

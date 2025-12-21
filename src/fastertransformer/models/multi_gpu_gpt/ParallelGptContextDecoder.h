@@ -31,6 +31,7 @@
 #include "src/fastertransformer/utils/allocator.h"
 #include "src/fastertransformer/utils/cublasMMWrapper.h"
 #include "src/fastertransformer/utils/custom_ar_comm.h"
+#include "src/fastertransformer/utils/moe_delta_checkpoint.h"
 
 // Optional streaming integration depends on DejaVu/StateStream. To allow
 // builds in environments with older protobuf, avoid including the headers
@@ -157,6 +158,12 @@ private:
     size_t ubatch_layer_prompt_size_;
     size_t per_layer_ubatch_offset_;
 
+    // Delta checkpoint for MoE fault tolerance
+    MoEDeltaCheckpointManager* delta_checkpoint_manager_ = nullptr;
+    MoECheckpointHelper        delta_checkpoint_helper_;
+    bool                       enable_delta_checkpoint_ = false;
+    int                        current_generation_step_ = 0;
+
 protected:
 public:
     std::atomic_bool*        restart;
@@ -211,6 +218,14 @@ public:
                             int                        layers_per_tp,
                             int                        tp_per_pp,
                             std::vector<DejaVuClient*> dejavu_clients);
+
+    // Delta checkpoint methods for MoE fault tolerance
+    void setDeltaCheckpointManager(MoEDeltaCheckpointManager* manager);
+    void enableDeltaCheckpoint(bool enable);
+    void setGenerationStep(int step) { current_generation_step_ = step; }
+    bool isInRecovery() const { return delta_checkpoint_manager_ && delta_checkpoint_manager_->isInRecovery(); }
+    bool initiateRecovery(int target_step, int ubatch_id);
+    void completeRecovery();
 };
 
 }  // namespace fastertransformer
