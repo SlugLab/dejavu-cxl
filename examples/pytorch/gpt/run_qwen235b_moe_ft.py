@@ -58,12 +58,35 @@ def setup_moe_ft_environment(args):
     os.environ['FT_LOG_LEVEL'] = args.log_level
     os.environ['ENABLE_FT_STATS'] = '1' if args.enable_ft_stats else '0'
 
+    # Delta checkpoint configuration
+    enable_delta = getattr(args, 'enable_delta_checkpoint', False)
+    os.environ['ENABLE_DELTA_CHECKPOINT'] = '1' if enable_delta else '0'
+    os.environ['ENABLE_KV_DELTA'] = '1' if getattr(args, 'enable_kv_delta', True) else '0'
+    os.environ['ENABLE_ACTIVATION_DELTA'] = '1' if getattr(args, 'enable_activation_delta', True) else '0'
+    os.environ['ENABLE_DELTA_COMPRESSION'] = '1' if getattr(args, 'enable_delta_compression', False) else '0'
+
     # Optional: failure injection for testing
     if args.enable_failure_injection:
         os.environ['ENABLE_FAILURE_INJECTION'] = '1'
         os.environ['FAILURE_INJECTION_RATE'] = str(args.failure_injection_rate)
-        print(f"\n⚠️  Failure injection ENABLED (rate={args.failure_injection_rate})")
+        print(f"\n  Failure injection ENABLED (rate={args.failure_injection_rate})")
         print("   This will randomly inject failures to test recovery!\n")
+
+    # Recovery test mode
+    enable_recovery_test = getattr(args, 'enable_recovery_test', False)
+    inject_failure_step = getattr(args, 'inject_failure_step', 0)
+    if enable_recovery_test:
+        os.environ['ENABLE_RECOVERY_TEST'] = '1'
+        os.environ['INJECT_FAILURE_STEP'] = str(inject_failure_step)
+        print(f"\n  Recovery test ENABLED")
+        print(f"  Failure will be injected at step {inject_failure_step}")
+        print("   System will attempt recovery from checkpoint!\n")
+
+    # Delta checkpoint interval from test script
+    delta_interval = getattr(args, 'delta_checkpoint_interval', 1)
+    delta_max = getattr(args, 'delta_max_checkpoints', 100)
+    os.environ['DELTA_CHECKPOINT_INTERVAL'] = str(delta_interval)
+    os.environ['DELTA_MAX_CHECKPOINTS'] = str(delta_max)
 
     print("\nMoE Token FT Configuration:")
     print(f"  Enabled: {os.environ['ENABLE_MOE_TOKEN_FT']}")
@@ -73,6 +96,18 @@ def setup_moe_ft_environment(args):
     print(f"  Device Pool: {args.moe_device_pool_mb} MB")
     print(f"  Host Buffer: {args.moe_host_buffer_mb} MB")
     print(f"  Log Level: {args.log_level}")
+    if enable_delta:
+        print(f"\nDelta Checkpoint Configuration:")
+        print(f"  Delta Checkpoint: ENABLED")
+        print(f"  Delta Interval: {delta_interval}")
+        print(f"  Delta Max Checkpoints: {delta_max}")
+        print(f"  KV Delta: {os.environ['ENABLE_KV_DELTA']}")
+        print(f"  Activation Delta: {os.environ['ENABLE_ACTIVATION_DELTA']}")
+        print(f"  Compression: {os.environ['ENABLE_DELTA_COMPRESSION']}")
+    if enable_recovery_test:
+        print(f"\nRecovery Test Configuration:")
+        print(f"  Recovery Test: ENABLED")
+        print(f"  Inject Failure at Step: {inject_failure_step}")
     print("=" * 80)
     print()
 
@@ -274,6 +309,17 @@ def main():
     ft_group.add_argument('--moe_host_buffer_mb', type=int, default=128,
                          help='Host memory buffer size (MB)')
 
+    # Delta checkpoint configuration
+    delta_group = parser.add_argument_group('Delta Checkpoint Configuration')
+    delta_group.add_argument('--enable_delta_checkpoint', action='store_true',
+                            help='Enable delta checkpointing (only saves changes)')
+    delta_group.add_argument('--enable_kv_delta', action='store_true', default=True,
+                            help='Enable KV cache delta checkpointing')
+    delta_group.add_argument('--enable_activation_delta', action='store_true', default=True,
+                            help='Enable activation delta checkpointing')
+    delta_group.add_argument('--enable_delta_compression', action='store_true',
+                            help='Enable compression for delta checkpoints')
+
     # Logging and debugging
     debug_group = parser.add_argument_group('Logging and Debugging')
     debug_group.add_argument('--log_level', type=str,
@@ -290,7 +336,15 @@ def main():
     test_group.add_argument('--enable_failure_injection', action='store_true',
                            help='Enable failure injection for testing')
     test_group.add_argument('--failure_injection_rate', type=float, default=0.01,
-                           help='Failure injection rate (0.01 = 1%)')
+                           help='Failure injection rate (0.01 = 1%%)')
+    test_group.add_argument('--enable_recovery_test', action='store_true',
+                           help='Enable recovery test mode (inject failure and recover)')
+    test_group.add_argument('--inject_failure_step', type=int, default=0,
+                           help='Step at which to inject failure (0=disabled)')
+    test_group.add_argument('--delta_checkpoint_interval', type=int, default=1,
+                           help='Delta checkpoint interval (for test script compatibility)')
+    test_group.add_argument('--delta_max_checkpoints', type=int, default=100,
+                           help='Maximum delta checkpoints to keep')
 
     # Other
     parser.add_argument('--inference_data_type', type=str,
@@ -414,7 +468,7 @@ def main():
         moe_layer_index=moe_layer_index,
         has_positional_encoding=False,  # Qwen2 uses RoPE
         gpt_with_moe=True,
-        activation_type="Silu",  # Qwen2 uses SwiGLU/Silu
+        activation_type="SiGLU",  # Qwen3 uses SwiGLU (gate_proj+up_proj fused in weights)
         layernorm_type="pre_layernorm",
         hidden_size=args.hidden_size,
         num_kv_heads=args.num_kv_heads
@@ -474,14 +528,15 @@ def main():
     print(f"[Rank {rank}] Input length: {args.input_len}, Output length: {args.output_len}")
 
     start_time = time.time()
+    prefill_start = time.time()
 
     try:
-        tokens_batch = gpt(start_ids_list,
-                          start_lengths_list,
-                          torch.IntTensor([args.output_len] * args.num_ubatches),
-                          1,  # beam_width (1 = greedy/sampling)
-                          args.top_k,
-                          args.top_p,
+        tokens_batch = gpt(start_ids=start_ids_list,
+                          start_lengths=start_lengths_list,
+                          output_len=torch.IntTensor([args.output_len] * args.num_ubatches),
+                          beam_width=1,
+                          top_k=args.top_k,
+                          top_p=args.top_p,
                           beam_search_diversity_rate=0.,
                           temperature=args.temperature,
                           len_penalty=0.,
@@ -490,6 +545,11 @@ def main():
                           return_output_length=True)
 
         end_time = time.time()
+        total_time_ms = (end_time - start_time) * 1000
+
+        # Print timing info in format expected by test script
+        if args.time and rank == 0:
+            print(f"\n[TIMING] Total generation took {total_time_ms:.2f} ms")
 
         if rank == 0:
             print(f"\n✓ Generation completed successfully!")
@@ -522,7 +582,8 @@ def main():
                     output_tokens = all_tokens[:length_val] if length_val > 0 else all_tokens
 
                     print(f"\nOutput {i+1}:")
-                    print(f"  Context: {contexts[i]}")
+                    context_idx = i % len(contexts) if contexts else 0
+                    print(f"  Context: {contexts[context_idx] if contexts else 'N/A'}")
                     print(f"  Output length: {length_val}, Total tokens: {len(all_tokens)}")
                     print(f"  First 10 tokens: {all_tokens[:10]}")
 

@@ -133,28 +133,31 @@ void BaseSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     // If runtime argument has single random seed, using this random seed to initialize the random table of all
     // sentences. If the argument has [batch_size] random seeds, initializing the random table by different random seeds
     // respectively. If no random seed, initialize the random table of all sentences by 0 directly.
-    // if (runtime_args->isExist("random_seed")) {
-    //     Tensor random_seeds = runtime_args->at("random_seed");
-    //     FT_CHECK_WITH_INFO(random_seeds.shape.size() == 1
-    //                            && (random_seeds.size() == 1 || random_seeds.size() == batch_size),
-    //                        fmtstr("random_seeds must be of shape [1] or [batch_size(%ld)], got random_seeds.shape=%s",
-    //                               batch_size,
-    //                               vec2str(random_seeds.shape).c_str()));
-    //     if (random_seeds.size() == 1) {
-    //         invokeCurandInitialize(curandstate_buf_, batch_size, random_seeds.getVal<unsigned long long>(), stream_);
-    //         sync_check_cuda_error();
-    //     }
-    //     else {
-    //         unsigned long long* random_seed_ptr = random_seeds.getPtr<unsigned long long>();
-    //         cudaAutoCpy(random_seeds_buf_, random_seed_ptr, batch_size, stream_);
-    //         invokeCurandBatchInitialize(curandstate_buf_, batch_size, random_seeds_buf_, stream_);
-    //         sync_check_cuda_error();
-    //     }
-    // }
-    // else {
+    if (runtime_args->isExist("random_seed")) {
+        Tensor random_seeds = runtime_args->at("random_seed");
+        FT_CHECK_WITH_INFO(random_seeds.shape.size() == 1
+                               && (random_seeds.size() == 1 || random_seeds.size() == batch_size),
+                           fmtstr("random_seeds must be of shape [1] or [batch_size(%ld)], got random_seeds.shape=%s",
+                                  batch_size,
+                                  vec2str(random_seeds.shape).c_str()));
+        if (random_seeds.size() == 1) {
+            unsigned long long seed_val = random_seeds.getVal<unsigned long long>();
+            printf("[FT][BaseSamp] Using random seed: %llu\n", seed_val); fflush(stdout);
+            invokeCurandInitialize(curandstate_buf_, batch_size, seed_val, stream_);
+            sync_check_cuda_error();
+        }
+        else {
+            unsigned long long* random_seed_ptr = random_seeds.getPtr<unsigned long long>();
+            cudaAutoCpy(random_seeds_buf_, random_seed_ptr, batch_size, stream_);
+            invokeCurandBatchInitialize(curandstate_buf_, batch_size, random_seeds_buf_, stream_);
+            sync_check_cuda_error();
+        }
+    }
+    else {
         // Initialize curand states using the default seed 0.
+        printf("[FT][BaseSamp] No random seed provided, using default seed 0\n"); fflush(stdout);
         invokeCurandInitialize(curandstate_buf_, batch_size, 0, stream_);
-    //}
+    }
 
     // Setup penalties.
     const float default_temperature = 1.0f;
@@ -163,7 +166,15 @@ void BaseSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
                                           Tensor(MEMORY_CPU, TYPE_FP32, {1}, &default_temperature);
     if (temperature.size() == 1) {
         float tp = temperature.getVal<float>();
+        printf("[FT][BaseSamp] setup: temperature_buf_=%p, filling with tp=%.6f, batch_size=%zu, stream=%p\n",
+               (void*)temperature_buf_, tp, batch_size, (void*)stream_); fflush(stdout);
         deviceFill(temperature_buf_, batch_size, tp, stream_);
+        cudaStreamSynchronize(stream_);
+        // Verify the GPU value right after fill
+        float gpu_temp_check = -999.0f;
+        cudaMemcpy(&gpu_temp_check, temperature_buf_, sizeof(float), cudaMemcpyDeviceToHost);
+        printf("[FT][BaseSamp] setup: after deviceFill, GPU temperature_buf_[0]=%.6f (expected %.6f)\n",
+               gpu_temp_check, tp); fflush(stdout);
         std::fill_n(temperature_, batch_size, tp);
     }
     else {
@@ -306,6 +317,16 @@ void BaseSamplingLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_t
     const T* embedding_bias =
         input_tensors->isExist("embedding_bias") ? input_tensors->at("embedding_bias").getPtr<T>() : nullptr;
     if (embedding_bias != nullptr || !ALL_OF(temperature_ + ite * local_batch_size, local_batch_size, float, 1.0f)) {
+        // Readback GPU temperature_buf_ to verify it hasn't been corrupted
+        {
+            float gpu_temp_val = -999.0f;
+            cudaMemcpy(&gpu_temp_val, temperature_buf_ + ite * local_batch_size, sizeof(float), cudaMemcpyDeviceToHost);
+            printf("[FT][BaseSamp] step=%d: applying temperature penalty (CPU temp=%.3f, GPU temp_buf=%.6f, "
+                   "temp_buf_ptr=%p, vocab=%zu, vocab_pad=%zu, ite=%d, this=%p)\n",
+                   step, temperature_[ite * local_batch_size], gpu_temp_val,
+                   (void*)(temperature_buf_ + ite * local_batch_size),
+                   vocab_size_, vocab_size_padded_, ite, (void*)this); fflush(stdout);
+        }
         invokeBatchApplyTemperaturePenalty(logits,
                                            embedding_bias,
                                            temperature_buf_ + ite * local_batch_size,
@@ -313,6 +334,16 @@ void BaseSamplingLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_t
                                            vocab_size_,
                                            vocab_size_padded_,
                                            stream_);
+        {
+            cudaError_t e = cudaStreamSynchronize(stream_);
+            if (e != cudaSuccess) {
+                printf("[FT][BaseSamp] step=%d: *** ERROR after temperature penalty: %s\n",
+                       step, cudaGetErrorString(e)); fflush(stdout);
+                cudaGetLastError();
+            } else {
+                printf("[FT][BaseSamp] step=%d: temperature penalty OK\n", step); fflush(stdout);
+            }
+        }
     }
     sync_check_cuda_error();
 

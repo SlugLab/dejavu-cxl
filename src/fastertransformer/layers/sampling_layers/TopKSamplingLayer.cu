@@ -93,6 +93,8 @@ void TopKSamplingLayer<T>::allocateBuffer(size_t batch_size, Tensor top_k, Tenso
         // a greedy decode, i.e. top_k=1, although such case has max_top_k=0.
         max_top_k = 1;
     }
+    printf("[FT][TopK] allocateBuffer: batch_size=%zu, top_k.size()=%zu, max_top_k=%u\n",
+           batch_size, top_k.size(), max_top_k); fflush(stdout);
     invokeTopKSampling<T>(nullptr,
                           sampling_workspace_size_,
                           nullptr,
@@ -109,6 +111,7 @@ void TopKSamplingLayer<T>::allocateBuffer(size_t batch_size, Tensor top_k, Tenso
                           stream_,
                           batch_size,
                           skip_decode_buf_);
+    printf("[FT][TopK] allocateBuffer: sampling_workspace_size_=%zu\n", sampling_workspace_size_); fflush(stdout);
     sampling_workspace_ = allocator_->reMalloc(sampling_workspace_, sampling_workspace_size_, false);
     runtime_top_k_buf_ =
         reinterpret_cast<uint*>(allocator_->reMalloc(runtime_top_k_buf_, sizeof(uint) * batch_size, false));
@@ -126,6 +129,10 @@ void TopKSamplingLayer<T>::freeBuffer()
         allocator_->free((void**)(&runtime_top_k_buf_));
         allocator_->free((void**)(&runtime_top_p_buf_));
     }
+    delete[] saved_top_k_array_;
+    saved_top_k_array_ = nullptr;
+    delete[] saved_top_p_array_;
+    saved_top_p_array_ = nullptr;
     BaseSamplingLayer<T>::freeBuffer();
     is_allocate_buffer_ = false;
 }
@@ -142,6 +149,8 @@ void TopKSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     //     repetition_penalty [1] or [batch_size] on cpu, optional
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    printf("[FT][TopK] setup() ENTER: batch_size=%zu, beam_width=%zu, has_runtime_top_k=%d\n",
+           batch_size, beam_width, runtime_args->isExist("runtime_top_k") ? 1 : 0); fflush(stdout);
     BaseSamplingLayer<T>::setup(batch_size, beam_width, runtime_args);
 
     uint         tmp_top_k     = 0;
@@ -155,22 +164,57 @@ void TopKSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     uint  top_k = runtime_top_k.max<uint>();
     float top_p = runtime_top_p_size == 0 ? 0.0f : runtime_top_p.getVal<float>();
 
+    // Save CPU-side values so we can re-apply them at each forward call.
+    // The GPU buffers (runtime_top_k_buf_, runtime_top_p_buf_) get corrupted
+    // between setup() and the first forward() by the context decoding phase.
+    saved_top_k_      = top_k;
+    saved_top_p_      = top_p;
+    saved_batch_size_  = batch_size;
+    saved_top_k_size_ = runtime_top_k_size;
+    saved_top_p_size_ = runtime_top_p_size;
+    delete[] saved_top_k_array_;
+    delete[] saved_top_p_array_;
+    saved_top_k_array_ = nullptr;
+    saved_top_p_array_ = nullptr;
     if (runtime_top_k_size > 1) {
-        // FT_CHECK_WITH_INFO(
-        //     runtime_top_k.size() == batch_size,
-        //     fmtstr("runtime_top_k.size() (%d) == batch_size (%d) is not satisfied!", runtime_top_k.size(), batch_size));
+        saved_top_k_array_ = new uint[batch_size];
+        for (size_t i = 0; i < batch_size; i++) {
+            saved_top_k_array_[i] = runtime_top_k.getPtr<uint>()[std::min(i, runtime_top_k_size - 1)];
+        }
+    }
+    if (runtime_top_p_size > 1) {
+        saved_top_p_array_ = new float[batch_size];
+        for (size_t i = 0; i < batch_size; i++) {
+            saved_top_p_array_[i] = runtime_top_p.getPtr<float>()[std::min(i, runtime_top_p_size - 1)];
+        }
+    }
+
+    printf("[FT][TopK] setup(): top_k=%u, top_p=%f, runtime_top_k_size=%zu, runtime_top_p_size=%zu\n",
+           top_k, top_p, runtime_top_k_size, runtime_top_p_size); fflush(stdout);
+
+    if (runtime_top_k_size > 1) {
         cudaAutoCpy(runtime_top_k_buf_, runtime_top_k.getPtr<uint>(), batch_size, stream_);
     }
     if (runtime_top_p_size > 1) {
-        // FT_CHECK_WITH_INFO(
-        //     runtime_top_p.size() == batch_size,
-        //     fmtstr("runtime_top_p.size() (%d) == batch_size (%d) is not satisfied!", runtime_top_p.size(), batch_size));
         cudaAutoCpy(runtime_top_p_buf_, runtime_top_p.getPtr<float>(), batch_size, stream_);
     }
 
+    // Compute runtime_max_top_k_ from CPU-side tensor values directly.
+    {
+        uint max_k = 0;
+        for (size_t i = 0; i < batch_size; i++) {
+            uint k = (runtime_top_k_size > 1) ? runtime_top_k.getPtr<uint>()[std::min(i, runtime_top_k_size - 1)] : top_k;
+            float p = (runtime_top_p_size > 1) ? runtime_top_p.getPtr<float>()[std::min(i, runtime_top_p_size - 1)] : top_p;
+            if (k == 0 && p == 0.0f) k = 1;
+            if (k > 1024) k = 1024;
+            if (k > max_k) max_k = k;
+        }
+        runtime_max_top_k_ = static_cast<int>(max_k);
+    }
+    printf("[FT][TopK] setup(): runtime_max_top_k_=%d\n", runtime_max_top_k_); fflush(stdout);
+
     dim3 block(std::min((int)batch_size, 256));
     dim3 grid(div_up((int)batch_size, (int)block.x));
-    // support top_k up to 1024.
     setup_topk_runtime_args<1024><<<grid, block, 0, stream_>>>(batch_size,
                                                                top_k,
                                                                runtime_top_k_buf_,
@@ -180,10 +224,6 @@ void TopKSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
                                                                runtime_top_p_size,
                                                                skip_decode_buf_);
     cudaAutoCpy(skip_decode_, skip_decode_buf_, batch_size, stream_);
-    uint* runtime_top_ks = new uint[batch_size];
-    cudaAutoCpy(runtime_top_ks, runtime_top_k_buf_, batch_size, stream_);
-    runtime_max_top_k_ = static_cast<int>(*std::max_element(runtime_top_ks, runtime_top_ks + batch_size));
-    delete[] runtime_top_ks;
 }
 
 template<typename T>
@@ -218,6 +258,41 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
     // in case of skip any, the logit value is already copied and processed.
     T* logits = !skip_any_ ? input_tensors->at("logits").getPtr<T>() : runtime_logits_buf_;
 
+    // Re-apply saved CPU-side top_k/top_p values to GPU buffers.
+    // The GPU buffers get corrupted by model operations between setup() and forward().
+    {
+        dim3 block(std::min((int)saved_batch_size_, 256));
+        dim3 grid(div_up((int)saved_batch_size_, (int)block.x));
+        if (saved_top_k_size_ > 1 && saved_top_k_array_ != nullptr) {
+            cudaMemcpyAsync(runtime_top_k_buf_, saved_top_k_array_,
+                            sizeof(uint) * saved_batch_size_, cudaMemcpyHostToDevice, stream_);
+        }
+        if (saved_top_p_size_ > 1 && saved_top_p_array_ != nullptr) {
+            cudaMemcpyAsync(runtime_top_p_buf_, saved_top_p_array_,
+                            sizeof(float) * saved_batch_size_, cudaMemcpyHostToDevice, stream_);
+        }
+        setup_topk_runtime_args<1024><<<grid, block, 0, stream_>>>(saved_batch_size_,
+                                                                    saved_top_k_,
+                                                                    runtime_top_k_buf_,
+                                                                    saved_top_k_size_,
+                                                                    saved_top_p_,
+                                                                    runtime_top_p_buf_,
+                                                                    saved_top_p_size_,
+                                                                    skip_decode_buf_);
+        // Restore runtime_max_top_k_ from saved values (it also gets corrupted)
+        {
+            uint max_k = 0;
+            for (size_t i = 0; i < saved_batch_size_; i++) {
+                uint k = (saved_top_k_size_ > 1 && saved_top_k_array_) ? saved_top_k_array_[i] : saved_top_k_;
+                float p = (saved_top_p_size_ > 1 && saved_top_p_array_) ? saved_top_p_array_[i] : saved_top_p_;
+                if (k == 0 && p == 0.0f) k = 1;
+                if (k > 1024) k = 1024;
+                if (k > max_k) max_k = k;
+            }
+            runtime_max_top_k_ = static_cast<int>(max_k);
+        }
+    }
+
     invokeAddBiasEndMask(logits,
                          (T*)(nullptr),
                          input_tensors->at("end_id").getPtr<const int>(),
@@ -226,7 +301,30 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
                          vocab_size_,
                          vocab_size_padded_,
                          stream_);
-    sync_check_cuda_error();
+    {
+        cudaError_t e = cudaStreamSynchronize(stream_);
+        if (e != cudaSuccess) {
+            printf("[FT][TopK] step=%d: *** ERROR after invokeAddBiasEndMask: %s\n",
+                   step, cudaGetErrorString(e)); fflush(stdout);
+            cudaGetLastError();
+        } else {
+            printf("[FT][TopK] step=%d: invokeAddBiasEndMask OK\n", step); fflush(stdout);
+        }
+    }
+
+    // Diagnostic: dump a few logit values to verify they're sensible
+    {
+        const int n_dump = 8;
+        T h_logits[8];
+        int dump_count = (vocab_size_padded_ < (size_t)n_dump) ? (int)vocab_size_padded_ : n_dump;
+        cudaMemcpyAsync(h_logits, logits, sizeof(T) * dump_count, cudaMemcpyDeviceToHost, stream_);
+        cudaStreamSynchronize(stream_);
+        printf("[FT][TopK] step=%d: logits[0..%d] = ", step, dump_count - 1);
+        for (int i = 0; i < dump_count; i++) {
+            printf("%.4f ", (float)h_logits[i]);
+        }
+        printf("\n"); fflush(stdout);
+    }
 
     float* cum_log_probs =
         output_tensors->isExist("cum_log_probs") ? output_tensors->at("cum_log_probs").getPtr<float>() : nullptr;
@@ -243,14 +341,27 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
             vocab_size_padded_,
             vocab_size_,
             stream_);
-        sync_check_cuda_error();
+        {
+            cudaError_t e = cudaStreamSynchronize(stream_);
+            if (e != cudaSuccess) {
+                printf("[FT][TopK] step=%d: *** ERROR after invokeAddBiasSoftMax: %s\n",
+                       step, cudaGetErrorString(e)); fflush(stdout);
+                cudaGetLastError();
+            } else {
+                printf("[FT][TopK] step=%d: invokeAddBiasSoftMax OK\n", step); fflush(stdout);
+            }
+        }
     }
+
+    int* ids_ptr = output_tensors->at("output_ids").getPtrWithOffset<int>(step * batch_size + ite * local_batch_size);
+    printf("[FT][TopK] step=%d: calling invokeBatchTopKSampling (ids_ptr=%p, offset=%d)\n",
+           step, (void*)ids_ptr, step * batch_size + ite * local_batch_size); fflush(stdout);
 
     invokeBatchTopKSampling(
         sampling_workspace_,
         sampling_workspace_size_,
         logits,
-        output_tensors->at("output_ids").getPtrWithOffset<int>(step * batch_size + ite * local_batch_size),
+        ids_ptr,
         output_tensors->at("sequence_length", Tensor{MEMORY_GPU, TYPE_INVALID, {}, nullptr}).getPtr<int>(),
         output_tensors->at("finished", Tensor{MEMORY_GPU, TYPE_INVALID, {}, nullptr}).getPtr<bool>(),
         cum_log_probs,
@@ -265,7 +376,26 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
         stream_,
         local_batch_size,
         skip_decode_buf_ + ite * local_batch_size);
-    sync_check_cuda_error();
+    {
+        cudaError_t e = cudaStreamSynchronize(stream_);
+        if (e != cudaSuccess) {
+            printf("[FT][TopK] step=%d: *** ERROR after invokeBatchTopKSampling: %s\n",
+                   step, cudaGetErrorString(e)); fflush(stdout);
+            cudaGetLastError();
+        } else {
+            printf("[FT][TopK] step=%d: invokeBatchTopKSampling OK\n", step); fflush(stdout);
+            // Dump sampled token IDs
+            int h_ids[4];
+            int n_ids = (local_batch_size < 4) ? local_batch_size : 4;
+            cudaMemcpyAsync(h_ids, ids_ptr, sizeof(int) * n_ids, cudaMemcpyDeviceToHost, stream_);
+            cudaStreamSynchronize(stream_);
+            printf("[FT][TopK] step=%d: sampled ids = ", step);
+            for (int i = 0; i < n_ids; i++) {
+                printf("%d ", h_ids[i]);
+            }
+            printf("\n"); fflush(stdout);
+        }
+    }
 }
 
 template<typename T>

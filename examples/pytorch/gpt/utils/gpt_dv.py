@@ -41,7 +41,8 @@ class GPTWeights:
                  int8_mode: int = 0,
                  inter_size: int = 0,
                  hidden_size: int = 0,
-                 num_kv_heads: int = 0):
+                 num_kv_heads: int = 0,
+                 expert_num: int = 0):
         assert (head_num % tensor_para_size == 0)
 
         if int8_mode == 1:
@@ -66,6 +67,7 @@ class GPTWeights:
         self.has_adapters = has_adapters
         self.adapter_inter_size = adapter_inter_size
         self.gpt_with_moe = gpt_with_moe
+        self.expert_num = expert_num
         self.has_positional_encoding = has_positional_encoding
         self.has_pre_decoder_layernorm = has_pre_decoder_layernorm
         self.has_post_decoder_layernorm = has_post_decoder_layernorm
@@ -392,21 +394,62 @@ class GPTWeights:
             w.extend([load_to_torch(f"{ckpt_path}/model.layers.{i}.mlp.dense_4h_to_h.bias.bin",
                      is_load(i)) for i in range(self.layer_num)])
         else:
-            # For MoE, create valid placeholder tensors (C++ loads actual expert weights from disk)
+            # For MoE, load expert weights from disk into flat buffers
+            # The CUTLASS MoE GEMM kernel expects all experts' weights concatenated:
+            #   expert_0 weights || expert_1 weights || ... || expert_N weights
+            # Each expert's weight is [gemm_k, gemm_n] in RowMajor (already transposed by converter)
+            expert_num = self.expert_num
             local_inter_size = self.local_inter_size
             global_hidden_units = self.global_hidden_units
             dtype = str_type_map[self.inference_data_type]
 
-            # FFN kernel1 placeholders: [global_hidden, local_inter]
-            w.extend([torch.zeros(global_hidden_units, local_inter_size, dtype=dtype) if is_load(i)
-                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
-            # FFN bias1 placeholders: [local_inter]
-            w.extend([torch.zeros(local_inter_size, dtype=dtype) if is_load(i)
-                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
-            # FFN kernel2 placeholders: [local_inter, global_hidden]
-            w.extend([torch.zeros(local_inter_size, global_hidden_units, dtype=dtype) if is_load(i)
-                     else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
-            # FFN bias2 placeholders: [global_hidden]
+            # FC1 (gate_proj + up_proj fused for SwiGLU):
+            # Each expert's gate_proj: [hidden_size, inter_size] on disk
+            # Each expert's up_proj:   [hidden_size, inter_size] on disk
+            # Fused: [hidden_size, 2*inter_size] per expert
+            # Flat buffer: num_experts * hidden_size * 2*inter_size elements
+            for i in range(self.layer_num):
+                if is_load(i):
+                    fc1_parts = []
+                    for e in range(expert_num):
+                        gate_path = f"{ckpt_path}/model.layers.{i}.mlp.experts.{e}.gate_proj.weight.{tp_rank}.bin"
+                        up_path = f"{ckpt_path}/model.layers.{i}.mlp.experts.{e}.up_proj.weight.{tp_rank}.bin"
+                        gate_w = np.fromfile(gate_path, dtype=self.weights_data_type)
+                        up_w = np.fromfile(up_path, dtype=self.weights_data_type)
+                        # Reshape to [hidden_size, inter_size] and concatenate along inter_size dim
+                        gate_2d = gate_w.reshape(global_hidden_units, local_inter_size)
+                        up_2d = up_w.reshape(global_hidden_units, local_inter_size)
+                        fused = np.concatenate([gate_2d, up_2d], axis=1)  # [hidden_size, 2*inter_size]
+                        fc1_parts.append(fused.flatten())
+                    fc1_flat = torch.from_numpy(np.concatenate(fc1_parts)).to(dtype)
+                    w.append(fc1_flat)
+                    if i == 0:
+                        print(f"[MoE] Layer {i} FC1 (gate+up fused): {fc1_flat.shape} = {expert_num} experts * {global_hidden_units} * {2*local_inter_size}")
+                else:
+                    w.append(torch.empty(0, dtype=dtype))
+            # FC1 bias: zeros, [num_experts * 2*inter_size] per layer (Qwen3 has no FFN bias)
+            for i in range(self.layer_num):
+                if is_load(i):
+                    w.append(torch.zeros(expert_num * 2 * local_inter_size, dtype=dtype))
+                else:
+                    w.append(torch.empty(0, dtype=dtype))
+            # FC2 (down_proj):
+            # Each expert's down_proj: [inter_size, hidden_size] on disk
+            # Flat buffer: num_experts * inter_size * hidden_size elements
+            for i in range(self.layer_num):
+                if is_load(i):
+                    fc2_parts = []
+                    for e in range(expert_num):
+                        down_path = f"{ckpt_path}/model.layers.{i}.mlp.experts.{e}.down_proj.weight.{tp_rank}.bin"
+                        down_w = np.fromfile(down_path, dtype=self.weights_data_type)
+                        fc2_parts.append(down_w)
+                    fc2_flat = torch.from_numpy(np.concatenate(fc2_parts)).to(dtype)
+                    w.append(fc2_flat)
+                    if i == 0:
+                        print(f"[MoE] Layer {i} FC2 (down_proj): {fc2_flat.shape} = {expert_num} experts * {local_inter_size} * {global_hidden_units}")
+                else:
+                    w.append(torch.empty(0, dtype=dtype))
+            # FC2 bias: zeros, [hidden_size] per layer
             w.extend([torch.zeros(global_hidden_units, dtype=dtype) if is_load(i)
                      else torch.empty(0, dtype=dtype) for i in range(self.layer_num)])
 
@@ -658,7 +701,8 @@ class GPT(nn.Module):
                                   int8_mode=int8_mode,
                                   inter_size=inter_size,
                                   hidden_size=hidden_size,
-                                  num_kv_heads=num_kv_heads)
+                                  num_kv_heads=num_kv_heads,
+                                  expert_num=expert_num)
         print(f"[DEBUG] GPTWeights created successfully")
 
         # Prepare for tensor/pipeline parallel

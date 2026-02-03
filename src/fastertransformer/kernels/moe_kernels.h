@@ -128,8 +128,12 @@ class CutlassMoeFCRunner {
 public:
     CutlassMoeFCRunner();
 
-    size_t getWorkspaceSize(
-        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k);
+    size_t getWorkspaceSize(const int  num_rows,
+                            const int  hidden_size,
+                            const int  inter_size,
+                            const int  num_experts,
+                            const int  k,
+                            const bool use_gated_activation = false);
 
     void run_moe_fc(const T*          input_activations,
                     const T*          gating_output,
@@ -149,7 +153,8 @@ public:
                     T*                expert_scales,
                     int*              expanded_source_row_to_expanded_dest_row,
                     int*              expert_for_source_row,
-                    cudaStream_t      stream);
+                    cudaStream_t      stream,
+                    const bool        use_gated_activation = false);
 
     void run_moe_fc(const T*          input_activations,
                     const T*          gating_output,
@@ -171,7 +176,8 @@ public:
                     T*                expert_scales,
                     int*              expanded_source_row_to_expanded_dest_row,
                     int*              expert_for_source_row,
-                    cudaStream_t      stream);
+                    cudaStream_t      stream,
+                    const bool        use_gated_activation = false);
 
     void compute_total_rows_before_expert(const int*   sorted_indices,
                                           const int    total_indices,
@@ -185,7 +191,8 @@ private:
                            const int hidden_size,
                            const int inter_size,
                            const int num_experts,
-                           const int k);
+                           const int k,
+                           const bool use_gated_activation = false);
 
 private:
     CubKeyValueSorter            sorter_;

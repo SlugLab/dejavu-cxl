@@ -556,12 +556,16 @@ CutlassMoeFCRunner<T, WeightType, Enable>::CutlassMoeFCRunner()
 
 template<typename T, typename WeightType, typename Enable>
 size_t CutlassMoeFCRunner<T, WeightType, Enable>::getWorkspaceSize(
-    const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k)
+    const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k,
+    const bool use_gated_activation)
 {
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     const int buf_size         = pad_to_multiple_of_16(k * num_rows * hidden_size);
-    const int interbuf_size    = pad_to_multiple_of_16(k * num_rows * inter_size);
+    // For gated activation (SwiGLU), FC1 output is 2*inter_size (gate+up fused),
+    // which gets reduced to inter_size after the gated activation kernel
+    const int fc1_out_size     = use_gated_activation ? 2 * inter_size : inter_size;
+    const int interbuf_size    = pad_to_multiple_of_16(k * num_rows * fc1_out_size);
     const int padded_experts   = pad_to_multiple_of_16(num_experts);
     const int num_moe_inputs   = pad_to_multiple_of_16(k * num_rows);
     int       num_softmax_outs = 0;
@@ -593,11 +597,13 @@ size_t CutlassMoeFCRunner<T, WeightType, Enable>::getWorkspaceSize(
 
 template<typename T, typename WeightType, typename Enable>
 void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(
-    char* ws_ptr, const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k)
+    char* ws_ptr, const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k,
+    const bool use_gated_activation)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     const int buf_size       = pad_to_multiple_of_16(k * num_rows * hidden_size);
-    const int interbuf_size  = pad_to_multiple_of_16(k * num_rows * inter_size);
+    const int fc1_out_size   = use_gated_activation ? 2 * inter_size : inter_size;
+    const int interbuf_size  = pad_to_multiple_of_16(k * num_rows * fc1_out_size);
     const int padded_experts = pad_to_multiple_of_16(num_experts);
     const int num_moe_inputs = pad_to_multiple_of_16(k * num_rows);
     // const int num_softmax_outs = pad_to_multiple_of_16(num_rows * num_experts);
@@ -618,6 +624,42 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(
     else {
         softmax_out_ = nullptr;
     }
+}
+
+// Gated activation kernel for MoE SwiGLU support.
+// Takes FC1 output of shape [num_rows, 2*inter_size] where first half is gate_proj result
+// and second half is up_proj result. Computes SiLU(gate) * up and writes compact output
+// of shape [num_rows, inter_size] to a separate output buffer (to avoid race conditions
+// from in-place compaction across CUDA blocks).
+template<typename T>
+__global__ void moe_gated_activation_kernel(const T* __restrict__ input, T* __restrict__ output,
+                                            const int inter_size, const int num_rows)
+{
+    const int row = blockIdx.x;
+    const int col = blockIdx.y * blockDim.x + threadIdx.x;
+    if (row >= num_rows || col >= inter_size) {
+        return;
+    }
+
+    const int read_offset  = row * 2 * inter_size;
+    const int write_offset = row * inter_size;
+
+    float gate_val = (float)input[read_offset + col];
+    float up_val   = (float)input[read_offset + inter_size + col];
+
+    // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+    float silu = gate_val / (1.0f + expf(-gate_val));
+
+    output[write_offset + col] = (T)(silu * up_val);
+}
+
+template<typename T>
+void launch_moe_gated_activation(const T* input, T* output, const int inter_size, const int num_rows, cudaStream_t stream)
+{
+    const int threads = std::min(1024, inter_size);
+    const int col_blocks = (inter_size + threads - 1) / threads;
+    dim3 grid(num_rows, col_blocks);
+    moe_gated_activation_kernel<T><<<grid, threads, 0, stream>>>(input, output, inter_size, num_rows);
 }
 
 template<typename T, typename WeightType, typename Enable>
@@ -641,7 +683,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
                                                            T*                expert_scales,
                                                            int*              expanded_source_row_to_expanded_dest_row,
                                                            int*              expert_for_source_row,
-                                                           cudaStream_t      stream)
+                                                           cudaStream_t      stream,
+                                                           const bool        use_gated_activation)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     static constexpr bool scales_required =
@@ -668,7 +711,10 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
         }
     }
 
-    configure_ws_ptrs(workspace_ptr, num_rows, hidden_size, inter_size, num_experts, k);
+    // For gated activation (SwiGLU): FC1 output is 2*inter_size, reduced to inter_size after gated act
+    const int fc1_inter_size = use_gated_activation ? 2 * inter_size : inter_size;
+
+    configure_ws_ptrs(workspace_ptr, num_rows, hidden_size, inter_size, num_experts, k, use_gated_activation);
     topk_gating_softmax_kernelLauncher<T>(gating_output,
                                           finished,
                                           expert_scales,
@@ -724,34 +770,79 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
     check_cuda_error(cudaGetLastError());
 #endif
 
-    moe_gemm_runner_.moe_gemm_bias_act(permuted_data_,
-                                       fc1_expert_weights,
-                                       fc1_scales,
-                                       fc1_expert_biases,
-                                       fc1_result_,
-                                       total_rows_before_expert_,
-                                       expanded_active_expert_rows,
-                                       inter_size,
-                                       hidden_size,
-                                       num_experts,
-                                       fc1_activation_type,
-                                       stream);
+    if (use_gated_activation) {
+        // For SwiGLU: FC1 GEMM without fused activation (output is 2*inter_size)
+        // gate_proj and up_proj weights are fused: [hidden_size, 2*inter_size] per expert
+        moe_gemm_runner_.moe_gemm(permuted_data_,
+                                  fc1_expert_weights,
+                                  fc1_scales,
+                                  fc1_result_,
+                                  total_rows_before_expert_,
+                                  expanded_active_expert_rows,
+                                  fc1_inter_size,
+                                  hidden_size,
+                                  num_experts,
+                                  stream);
 
 #ifndef NDEBUG
-    cudaDeviceSynchronize();
-    check_cuda_error(cudaGetLastError());
+        cudaDeviceSynchronize();
+        check_cuda_error(cudaGetLastError());
 #endif
 
-    moe_gemm_runner_.moe_gemm(fc1_result_,
-                              fc2_expert_weights,
-                              fc2_scales,
-                              fc2_result,
-                              total_rows_before_expert_,
-                              expanded_active_expert_rows,
-                              hidden_size,
-                              inter_size,
-                              num_experts,
-                              stream);
+        // Gated activation: SiLU(gate_result) * up_result, compact from 2*inter to inter.
+        // Write to permuted_data_ (safe to reuse since FC1 already consumed it).
+        // permuted_data_ has size [k * num_rows * hidden_size] >= [expanded_active * inter_size].
+        launch_moe_gated_activation(fc1_result_, permuted_data_, inter_size, expanded_active_expert_rows, stream);
+
+#ifndef NDEBUG
+        cudaDeviceSynchronize();
+        check_cuda_error(cudaGetLastError());
+#endif
+
+        // FC2 GEMM reads from permuted_data_ (gated activation output)
+        moe_gemm_runner_.moe_gemm(permuted_data_,
+                                  fc2_expert_weights,
+                                  fc2_scales,
+                                  fc2_result,
+                                  total_rows_before_expert_,
+                                  expanded_active_expert_rows,
+                                  hidden_size,
+                                  inter_size,
+                                  num_experts,
+                                  stream);
+    }
+    else {
+        // Original path: FC1 GEMM with fused bias + activation
+        moe_gemm_runner_.moe_gemm_bias_act(permuted_data_,
+                                           fc1_expert_weights,
+                                           fc1_scales,
+                                           fc1_expert_biases,
+                                           fc1_result_,
+                                           total_rows_before_expert_,
+                                           expanded_active_expert_rows,
+                                           inter_size,
+                                           hidden_size,
+                                           num_experts,
+                                           fc1_activation_type,
+                                           stream);
+
+#ifndef NDEBUG
+        cudaDeviceSynchronize();
+        check_cuda_error(cudaGetLastError());
+#endif
+
+        // FC2 GEMM reads from fc1_result_ (original path)
+        moe_gemm_runner_.moe_gemm(fc1_result_,
+                                  fc2_expert_weights,
+                                  fc2_scales,
+                                  fc2_result,
+                                  total_rows_before_expert_,
+                                  expanded_active_expert_rows,
+                                  hidden_size,
+                                  inter_size,
+                                  num_experts,
+                                  stream);
+    }
 
 #ifndef NDEBUG
     cudaDeviceSynchronize();
@@ -778,7 +869,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
                                                            T*                expert_scales,
                                                            int*              expanded_source_row_to_expanded_dest_row,
                                                            int*              expert_for_source_row,
-                                                           cudaStream_t      stream)
+                                                           cudaStream_t      stream,
+                                                           const bool        use_gated_activation)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     run_moe_fc(input_activations,
@@ -801,7 +893,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
                expert_scales,
                expanded_source_row_to_expanded_dest_row,
                expert_for_source_row,
-               stream);
+               stream,
+               use_gated_activation);
 }
 
 template<typename T, typename WeightType, typename Enable>

@@ -81,10 +81,11 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     }
 
     // TODO: INT8 and Sparsity are currently not implemented (geglu or reglu)
-    const bool use_gated_activation = use_gated_activation_ && ffn_weights->intermediate_weight2.kernel != nullptr;
-
-    // moe can't be used with use_gated_activation currently
-    FT_CHECK(!(use_gated_activation && use_moe));
+    // For non-MoE: gated activation uses intermediate_weight2 for the second projection
+    // For MoE: gated activation uses fused gate+up weights in intermediate_weight (2*inter_size)
+    const bool use_gated_activation = use_gated_activation_ && !use_moe
+                                      && ffn_weights->intermediate_weight2.kernel != nullptr;
+    const bool use_moe_gated_activation = use_gated_activation_ && use_moe;
     auto activation_type = getActivationType();
 
     const int* ia3_tasks = input_tensors->getPtr<const int>("ia3_tasks", nullptr);
@@ -92,12 +93,6 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     if (use_moe) {
         PUSH_RANGE("FFN moe");
         FT_CHECK(ia3_tasks == nullptr);
-        // Debug: print MoE gating parameters
-        fprintf(stderr, "[FT][FFN] MoE gating GEMM: expert_num=%zu m=%d hidden_units=%zu\n",
-                expert_num_, m, hidden_units_);
-        fprintf(stderr, "  gating_weight=%p input=%p moe_gates_buf_=%p\n",
-                (void*)ffn_weights->gating_weight.kernel, (void*)input_tensor, (void*)moe_gates_buf_);
-        fflush(stderr);
         cublas_wrapper_->Gemm(CUBLAS_OP_N,
                               CUBLAS_OP_N,
                               expert_num_,
@@ -109,24 +104,8 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               hidden_units_,
                               moe_gates_buf_,
                               expert_num_);
-        // Debug: check after gating GEMM
-        {
-            cudaError_t err = cudaStreamSynchronize(stream_);
-            fprintf(stderr, "[FT][FFN] After gating GEMM: err=%s\n",
-                    err == cudaSuccess ? "OK" : cudaGetErrorString(err));
-            fflush(stderr);
-        }
 
         if (int8_mode_ == 0) {
-            // Debug: print MoE FC parameters
-            fprintf(stderr, "[FT][FFN] MoE FC: m=%d hidden=%zu inter=%zu experts=%zu moe_k=%zu\n",
-                    m, hidden_units_, inter_size_, expert_num_, moe_k);
-            fprintf(stderr, "  intermediate_weight=%p output_weight=%p\n",
-                    (void*)ffn_weights->intermediate_weight.kernel,
-                    (void*)ffn_weights->output_weight.kernel);
-            fprintf(stderr, "  moe_fc_workspace_=%p output_tensor=%p\n",
-                    (void*)moe_fc_workspace_, (void*)output_tensor);
-            fflush(stderr);
             moe_fc_runner_->run_moe_fc(input_tensor,
                                        moe_gates_buf_,
                                        ffn_weights->intermediate_weight.kernel,
@@ -145,14 +124,8 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                        expert_scales,
                                        permuted_rows,
                                        permuted_experts,
-                                       stream_);
-            // Debug: check after MoE FC
-            {
-                cudaError_t err = cudaStreamSynchronize(stream_);
-                fprintf(stderr, "[FT][FFN] After MoE FC: err=%s\n",
-                        err == cudaSuccess ? "OK" : cudaGetErrorString(err));
-                fflush(stderr);
-            }
+                                       stream_,
+                                       use_moe_gated_activation);
         }
         else if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(moe_int8_weight_only_fc_runner_.get() != NULL,
@@ -496,7 +469,8 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe)
         size_t ws_size_moe = 0;
         if (int8_mode_ == 0) {
             FT_CHECK_WITH_INFO(moe_fc_runner_.get() != NULL, "moe runner was not initialized.");
-            ws_size_moe = moe_fc_runner_->getWorkspaceSize(token_num, hidden_units_, inter_size_, expert_num_, moe_k);
+            ws_size_moe = moe_fc_runner_->getWorkspaceSize(
+                token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_gated_activation_);
         }
         else if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(moe_int8_weight_only_fc_runner_.get() != NULL,

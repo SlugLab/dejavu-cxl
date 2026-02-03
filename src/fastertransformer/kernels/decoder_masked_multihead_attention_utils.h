@@ -1323,10 +1323,11 @@ inline __device__ void zero(T& dst)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float2 rotary_embedding_coefficient(const int zid, const int rot_embed_dim, const float t_step)
+inline __device__ float2 rotary_embedding_coefficient(const int zid, const int rot_embed_dim, const float t_step,
+                                                       const float base = 1000000.0f)
 {
-    const float inv_freq = t_step / pow(10000.0f, zid / (float)rot_embed_dim);
-    return {cos(inv_freq), sin(inv_freq)};
+    const float inv_freq = t_step / powf(base, zid / (float)rot_embed_dim);
+    return {cosf(inv_freq), sinf(inv_freq)};
 }
 
 inline __device__ float2 rotary_embedding_transform(const float2 v, const float2 coef)

@@ -163,7 +163,8 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
                                             size_per_head,
                                             rotary_embedding_dim,
                                             neox_rotary_style,
-                                            head_num * size_per_head,
+                                            // d_model: use hidden_size if provided, otherwise head_num * size_per_head
+                                            hidden_size > 0 ? hidden_size : head_num * size_per_head,
                                             1.0f,
                                             tensor_para,
                                             stream,

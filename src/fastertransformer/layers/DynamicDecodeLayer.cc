@@ -440,8 +440,46 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
         // then topk_decode handles [4, x, 4 + 0.5]
         //      topp_decode handles [x, 0.5, x]
         // where "x" are skipped.
+        // Pre-topk diagnostic: check CUDA state and print tensor info
+        {
+            cudaError_t pre = cudaDeviceSynchronize();
+            printf("[FT][DynDec] step=%d: PRE-TOPK cuda_state=%s logits_ptr=%p logits_shape=[%zu,%zu,%zu] "
+                   "output_ids_shape=[%zu,%zu] batch=%zu local_batch=%zu\n",
+                   step, pre == cudaSuccess ? "CLEAN" : cudaGetErrorString(pre),
+                   (void*)decode_input_tensors.at("logits").getPtr<float>(),
+                   decode_input_tensors.at("logits").shape[0],
+                   decode_input_tensors.at("logits").shape.size() > 1 ? decode_input_tensors.at("logits").shape[1] : 0,
+                   decode_input_tensors.at("logits").shape.size() > 2 ? decode_input_tensors.at("logits").shape[2] : 0,
+                   decode_output_tensors.at("output_ids").shape[0],
+                   decode_output_tensors.at("output_ids").shape[1],
+                   batch_size, local_batch_size);
+            fflush(stdout);
+            if (pre != cudaSuccess) cudaGetLastError();
+        }
+
+        printf("[FT][DynDec] step=%d: calling topk_decode_->forward()\n", step); fflush(stdout);
         topk_decode_->forward(&decode_output_tensors, &decode_input_tensors);
+        {
+            cudaError_t topk_err = cudaDeviceSynchronize();
+            if (topk_err != cudaSuccess) {
+                printf("[FT][DynDec] step=%d: CUDA ERROR after topk: %s (code=%d)\n",
+                       step, cudaGetErrorString(topk_err), (int)topk_err); fflush(stdout);
+                cudaGetLastError();
+            } else {
+                printf("[FT][DynDec] step=%d: topk CLEAN\n", step); fflush(stdout);
+            }
+        }
+        printf("[FT][DynDec] step=%d: topk done, calling topp_decode_->forward()\n", step); fflush(stdout);
         topp_decode_->forward(&decode_output_tensors, &decode_input_tensors);
+        {
+            cudaError_t topp_err = cudaDeviceSynchronize();
+            if (topp_err != cudaSuccess) {
+                printf("[FT][DynDec] step=%d: CUDA ERROR after topp: %s\n",
+                       step, cudaGetErrorString(topp_err)); fflush(stdout);
+                cudaGetLastError();
+            }
+        }
+        printf("[FT][DynDec] step=%d: topp done\n", step); fflush(stdout);
     }
 
     if (input_tensors->isExist("stop_words_list")) {
@@ -462,6 +500,7 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
     }
 
     if (input_tensors->isExist("sequence_limit_length")) {
+        printf("[FT][DynDec] step=%d: calling invokeLengthCriterion\n", step); fflush(stdout);
         invokeLengthCriterion(output_tensors->at("finished").getPtr<bool>(),
                               output_tensors->at("should_stop").getPtr<bool>(),
                               h_pinned_finished_sum_,
@@ -470,7 +509,25 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
                               beam_width,
                               step,
                               stream_);
-        cudaDeviceSynchronize();
+        printf("[FT][DynDec] step=%d: calling cudaDeviceSynchronize\n", step); fflush(stdout);
+        {
+            cudaError_t sync_err = cudaDeviceSynchronize();
+            if (sync_err != cudaSuccess) {
+                printf("[FT][DynDec] step=%d: CUDA ERROR during dynamic decode sync: %s (code=%d)\n",
+                       step, cudaGetErrorString(sync_err), (int)sync_err); fflush(stdout);
+                // Try to clear the error (won't work for sticky errors like IllegalAddress)
+                cudaGetLastError();
+            }
+            else {
+                printf("[FT][DynDec] step=%d: cudaDeviceSynchronize done (clean)\n", step); fflush(stdout);
+            }
+            // Also check for any pending errors
+            cudaError_t last_err = cudaGetLastError();
+            if (last_err != cudaSuccess) {
+                printf("[FT][DynDec] step=%d: CUDA LAST ERROR after sync: %s (code=%d)\n",
+                       step, cudaGetErrorString(last_err), (int)last_err); fflush(stdout);
+            }
+        }
     }
 }
 

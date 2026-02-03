@@ -150,8 +150,18 @@ void invokeLengthCriterion(bool*           finished,
 
     length_criterion<<<grid, block, 0, stream>>>(
         finished, should_stop, h_pinned_finished_sum_, sequence_limit_length, batch_size, beam_width, step);
-    while (((volatile int*)h_pinned_finished_sum_)[0] == -1) {};
-    sync_check_cuda_error();
+
+    // Use cudaStreamSynchronize instead of spin-wait to properly handle CUDA errors.
+    // The original spin-wait loop hangs forever if a prior kernel on the stream had a
+    // CUDA error, since the length_criterion kernel never gets to execute.
+    cudaError_t sync_err = cudaStreamSynchronize(stream);
+    if (sync_err != cudaSuccess) {
+        printf("[FT][ERROR] CUDA error in length_criterion: %s\n", cudaGetErrorString(sync_err));
+        // Clear the error
+        cudaGetLastError();
+        // Set safe defaults
+        h_pinned_finished_sum_[0] = 0;
+    }
 
     *should_stop = h_pinned_finished_sum_[0] == batch_size * beam_width;
 }

@@ -28,6 +28,8 @@ namespace fastertransformer
         self_attention_layer_ = new TensorParallelDecoderSelfAttentionLayer<T>(max_batch_size_,
                                                                                head_num_,
                                                                                size_per_head_,
+                                                                               rotary_embedding_dim_,
+                                                                               false,  // neox_rotary_style
                                                                                tensor_para_,
                                                                                stream_,
                                                                                cublas_wrapper_,
@@ -40,7 +42,7 @@ namespace fastertransformer
                                                                                enable_custom_all_reduce_,
                                                                                hidden_units_);
 
-        bool use_gated_activation = activation_type_ == ActivationType::GeGLU || activation_type_ == ActivationType::ReGLU;
+        bool use_gated_activation = activation_type_ == ActivationType::GeGLU || activation_type_ == ActivationType::ReGLU || activation_type_ == ActivationType::SiGLU;
         size_t max_inter_size = has_adapters_ ? std::max(inter_size_, adapter_inter_size_) : inter_size_;
         if (activation_type_ == ActivationType::Gelu || activation_type_ == ActivationType::GeGLU)
         {
@@ -140,6 +142,7 @@ namespace fastertransformer
                                                                               layernorm_eps_(layernorm_eps),
                                                                               layernorm_type_(gpt_variant_params.layernorm_type),
                                                                               activation_type_(gpt_variant_params.activation_type),
+                                                                              rotary_embedding_dim_(!gpt_variant_params.has_positional_encoding ? size_per_head : 0),
                                                                               adapter_inter_size_(gpt_variant_params.adapter_inter_size),
                                                                               has_adapters_(gpt_variant_params.has_adapters),
                                                                               hidden_units_(hidden_size > 0 ? hidden_size : head_num_ * size_per_head_),
@@ -170,6 +173,7 @@ namespace fastertransformer
                                                                                       layernorm_eps_(decoder.layernorm_eps_),
                                                                                       layernorm_type_(decoder.layernorm_type_),
                                                                                       activation_type_(decoder.activation_type_),
+                                                                                      rotary_embedding_dim_(decoder.rotary_embedding_dim_),
                                                                                       adapter_inter_size_(decoder.adapter_inter_size_),
                                                                                       has_adapters_(decoder.has_adapters_),
                                                                                       hidden_units_(decoder.hidden_units_),
@@ -385,18 +389,29 @@ namespace fastertransformer
 
             if (layernorm_type_ == LayerNormType::pre_layernorm)
             {
-                // Use opt_version=0 for RMSNorm (nullptr beta) - optimized path crashes on nullptr
-                invokeGeneralLayerNorm(decoder_normed_input_,
-                                       decoder_input,
-                                       layer_weight->pre_layernorm_weights.gamma,
-                                       layer_weight->pre_layernorm_weights.beta,
-                                       layernorm_eps_,
-                                       local_batch_size,
-                                       hidden_units_,
-                                       const_cast<float *>(layer_weight->self_attention_weights.query_weight.scale),
-                                       int8_mode_,
-                                       stream_,
-                                       layer_weight->pre_layernorm_weights.beta ? 2 : 0);
+                if (layer_weight->pre_layernorm_weights.beta == nullptr) {
+                    // RMSNorm path (Qwen3, LLaMA, etc.)
+                    invokeGeneralT5LayerNorm(decoder_normed_input_,
+                                             decoder_input,
+                                             layer_weight->pre_layernorm_weights.gamma,
+                                             (const T*)nullptr,
+                                             layernorm_eps_,
+                                             local_batch_size,
+                                             hidden_units_,
+                                             stream_);
+                } else {
+                    invokeGeneralLayerNorm(decoder_normed_input_,
+                                           decoder_input,
+                                           layer_weight->pre_layernorm_weights.gamma,
+                                           layer_weight->pre_layernorm_weights.beta,
+                                           layernorm_eps_,
+                                           local_batch_size,
+                                           hidden_units_,
+                                           const_cast<float *>(layer_weight->self_attention_weights.query_weight.scale),
+                                           int8_mode_,
+                                           stream_,
+                                           2);
+                }
             }
             sync_check_cuda_error();
             POP_RANGE;
@@ -747,18 +762,29 @@ namespace fastertransformer
                                       hidden_units_,
                                       stream_);
                     }
-                    // Use opt_version=0 for RMSNorm (nullptr beta)
-                    invokeGeneralLayerNorm(decoder_output,
-                                           decoder_output,
-                                           layer_weight->self_attn_layernorm_weights.gamma,
-                                           layer_weight->self_attn_layernorm_weights.beta,
-                                           layernorm_eps_,
-                                           local_batch_size,
-                                           hidden_units_,
-                                           (float *)nullptr,
-                                           0,
-                                           stream_,
-                                           layer_weight->self_attn_layernorm_weights.beta ? 2 : 0);
+                    if (layer_weight->self_attn_layernorm_weights.beta == nullptr) {
+                        // RMSNorm path (Qwen3, LLaMA, etc.)
+                        invokeGeneralT5LayerNorm(decoder_output,
+                                                 decoder_output,
+                                                 layer_weight->self_attn_layernorm_weights.gamma,
+                                                 (const T*)nullptr,
+                                                 layernorm_eps_,
+                                                 local_batch_size,
+                                                 hidden_units_,
+                                                 stream_);
+                    } else {
+                        invokeGeneralLayerNorm(decoder_output,
+                                               decoder_output,
+                                               layer_weight->self_attn_layernorm_weights.gamma,
+                                               layer_weight->self_attn_layernorm_weights.beta,
+                                               layernorm_eps_,
+                                               local_batch_size,
+                                               hidden_units_,
+                                               (float *)nullptr,
+                                               0,
+                                               stream_,
+                                               2);
+                    }
                 }
             }
             sync_check_cuda_error();

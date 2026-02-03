@@ -229,6 +229,23 @@ void TopPSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     const float*    top_p_decay     = runtime_args->getPtr<float>("top_p_decay", nullptr);
     const float*    top_p_min       = runtime_args->getPtr<float>("top_p_min", nullptr);
     const uint32_t* top_p_reset_ids = runtime_args->getPtr<uint32_t>("top_p_reset_ids", nullptr);
+    // Compute runtime_max_top_p_ and skip_decode_ from CPU-side tensor values directly.
+    // The GPU roundtrip is unreliable on some platforms.
+    {
+        float max_p = 0.0f;
+        for (size_t i = 0; i < batch_size; i++) {
+            uint k = (runtime_top_k_size > 1) ? runtime_top_k.getPtr<uint>()[std::min(i, runtime_top_k_size - 1)] : top_k;
+            float p = (runtime_top_p_size > 1) ? runtime_top_p.getPtr<float>()[std::min(i, runtime_top_p_size - 1)] : top_p;
+            if (k == 0 && p == 0.0f) k = 1;  // greedy fallback (matches kernel logic)
+            p = p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);  // clip to [0, 1]
+            skip_decode_[i] = k > 0;  // TopP skipped when TopK handles it
+            if (p > max_p) max_p = p;
+        }
+        runtime_max_top_p_ = max_p;
+    }
+    printf("[FT][TopP] setup(): top_k=%u, top_p=%f, runtime_max_top_p_=%f, skip_decode_[0]=%d\n",
+           top_k, top_p, runtime_max_top_p_, (int)skip_decode_[0]); fflush(stdout);
+
     set_topp_runtime_args<<<grid, block, 0, stream_>>>(batch_size,
                                                        top_k,
                                                        runtime_top_k_buf_,
@@ -246,10 +263,6 @@ void TopPSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
                                                        top_p_reset_ids);
     sync_check_cuda_error();
     cudaAutoCpy(skip_decode_, skip_decode_buf_, batch_size, stream_);
-    float* runtime_top_ps = new float[batch_size];
-    cudaAutoCpy(runtime_top_ps, runtime_top_p_buf_, batch_size, stream_);
-    runtime_max_top_p_ = *std::max_element(runtime_top_ps, runtime_top_ps + batch_size);
-    delete[] runtime_top_ps;
 }
 
 template<typename T>

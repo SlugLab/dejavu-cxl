@@ -42,7 +42,14 @@ template<typename T>
 void ParallelGpt<T>::gpu_sync(cudaStream_t stream)
 {
 #ifdef STREAM_SYNC
-    cudaStreamSynchronize(stream);
+    cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        printf("[FT][SYNC] CUDA ERROR in gpu_sync: %s (code=%d)\n",
+               cudaGetErrorString(err), (int)err);
+        fflush(stdout);
+        cudaGetLastError();  // clear
+        throw std::runtime_error(std::string("[FT] CUDA error in gpu_sync: ") + cudaGetErrorString(err));
+    }
 #else
     sync_check_cuda_error();
 #endif
@@ -1448,6 +1455,34 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
 
     POP_RANGE;
 
+    // CRITICAL: Check for any CUDA errors from the entire context/prefill phase
+    // sync_check_cuda_error() is a no-op in release builds, so errors from context decoder,
+    // MoE forward, layernorm, etc. can silently propagate. This explicit sync catches them.
+    {
+        cudaError_t ctx_err = cudaDeviceSynchronize();
+        if (ctx_err != cudaSuccess) {
+            printf("[FT][CRITICAL] CUDA ERROR after context/prefill phase: %s (code=%d)\n",
+                   cudaGetErrorString(ctx_err), (int)ctx_err); fflush(stdout);
+            printf("[FT][CRITICAL] The error originates in the CONTEXT phase, not the generation loop!\n");
+            fflush(stdout);
+            cudaGetLastError();  // try to clear
+        } else {
+            printf("[FT][DEBUG] Context/prefill phase completed with no CUDA errors\n"); fflush(stdout);
+        }
+    }
+
+    // Diagnostic: verify input tokens are in output_ids_buf_ before generation loop
+    {
+        const int n_check = (max_input_length < 8) ? max_input_length : 8;
+        int h_output_ids[8];
+        cudaMemcpy(h_output_ids, output_ids_buf_, sizeof(int) * n_check, cudaMemcpyDeviceToHost);
+        printf("[FT][DEBUG] output_ids_buf_[0..%d] (should be input tokens): ", n_check - 1);
+        for (int i = 0; i < n_check; i++) {
+            printf("%d ", h_output_ids[i]);
+        }
+        printf("\n"); fflush(stdout);
+    }
+
     // If continue, we restart from initial_step because last token hasn't been processed in decoder
 
     printf("---------------------- step_start is %d, initial_step is %d, max_input_length is %d, gen_len is %lu\n",
@@ -1455,6 +1490,29 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
            initial_step,
            max_input_length,
            gen_len);
+
+    // Print buffer addresses and GPU memory for debugging
+    {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        printf("[FT][BUFFERS] GPU memory: free=%zu MB, total=%zu MB, used=%zu MB\n",
+               free_mem / (1024*1024), total_mem / (1024*1024), (total_mem - free_mem) / (1024*1024));
+        printf("[FT][BUFFERS] key_cache_=%p, value_cache_=%p\n", (void*)key_cache_, (void*)value_cache_);
+        printf("[FT][BUFFERS] decoder_output_buf_=%p, normed_decoder_output_buf_=%p\n",
+               (void*)decoder_output_buf_, (void*)normed_decoder_output_buf_);
+        printf("[FT][BUFFERS] logits_buf_=%p, output_ids_buf_=%p, parent_ids_buf_=%p\n",
+               (void*)logits_buf_, (void*)output_ids_buf_, (void*)parent_ids_buf_);
+        printf("[FT][BUFFERS] finished_buf_=%p, sequence_lengths_=%p\n",
+               (void*)finished_buf_, (void*)sequence_lengths_);
+        printf("[FT][BUFFERS] padded_embedding_kernel_ptr_=%p\n", (void*)padded_embedding_kernel_ptr_);
+        if (enable_delta_checkpoint_ && delta_checkpoint_manager_ != nullptr) {
+            printf("[FT][BUFFERS] delta checkpoint enabled, ring buffer in use\n");
+            printf("[FT][BUFFERS] ring buffer memory usage: %zu bytes\n",
+                   delta_checkpoint_manager_->getMemoryUsage());
+        }
+        printf("[FT][BUFFERS] hidden_units_=%zu, vocab_size_padded_=%zu\n", hidden_units_, vocab_size_padded_);
+        fflush(stdout);
+    }
 
     for (int microbatch = 0; microbatch < iteration_num; ++microbatch) {
         microbatch_should_stop_[microbatch] = false;
@@ -1598,6 +1656,15 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                                              batch_size * beam_width,
                                                              0,
                                                              stream_);
+                    // Debug: check for errors after embedding lookup
+                    {
+                        cudaError_t emb_err = cudaDeviceSynchronize();
+                        if (emb_err != cudaSuccess) {
+                            printf("[FT][DEBUG] step=%d: CUDA ERROR after embedding lookup: %s\n",
+                                   step_, cudaGetErrorString(emb_err)); fflush(stdout);
+                            cudaGetLastError();
+                        }
+                    }
                     gpu_sync(stream_);
 
                     if (gpt_variant_params_.has_pre_decoder_layernorm) {
@@ -1673,10 +1740,25 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                 gpt_decoder_->setGenerationStep(step_);
                 gpt_decoder_->forward(
                     &decoder_output_tensors, &decoder_input_tensors, &gpt_weights->decoder_layer_weights);
+                {
+                    cudaError_t err = cudaDeviceSynchronize();
+                    if (err != cudaSuccess) {
+                        printf("[FT][DEBUG] step=%d: CUDA ERROR after decoder forward: %s\n",
+                               step_, cudaGetErrorString(err)); fflush(stdout);
+                    }
+                    err = cudaGetLastError();
+                    if (err != cudaSuccess) {
+                        printf("[FT][DEBUG] step=%d: CUDA LAST ERROR: %s\n",
+                               step_, cudaGetErrorString(err)); fflush(stdout);
+                    }
+                }
+                printf("[FT][DEBUG] step=%d: decoder forward COMPLETED (CUDA sync OK)\n", step_); fflush(stdout);
             }
 
             if (!fill_caches_only && pipeline_para_.rank_ == pipeline_para_.world_size_ - 1) {
 
+                printf("[FT][DEBUG] step=%d: entering post-decoder processing (hidden_units_offset=%d, vocab_size_units_offset=%d)\n",
+                       step_, hidden_units_offset, vocab_size_units_offset); fflush(stdout);
                 // OPT
                 PUSH_RANGE("Token Final Layer Norm");
                 T* decoder_output_final_buf =
@@ -1698,6 +1780,15 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                            0);  // opt_version=0: use non-optimized kernel that handles nullptr beta
                 }
                 gpu_sync(stream_);
+                {
+                    cudaError_t ln_err = cudaDeviceSynchronize();
+                    if (ln_err != cudaSuccess) {
+                        printf("[FT][DEBUG] step=%d: CUDA ERROR after post-decoder layernorm: %s\n",
+                               step_, cudaGetErrorString(ln_err)); fflush(stdout);
+                        cudaGetLastError();
+                    }
+                }
+                printf("[FT][DEBUG] step=%d: post-decoder layernorm done\n", step_); fflush(stdout);
                 POP_RANGE;
 
                 if (tensor_para_.world_size_ == 1) {
@@ -1705,6 +1796,11 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                     float beta  = 0.0f;
                     PUSH_RANGE("logits gemm");
 
+                    printf("[FT][DEBUG] step=%d: starting logits GEMM (%zu x %zu x %zu) A=%p B=%p C=%p\n",
+                           step_, vocab_size_padded_, local_batch_size * beam_width, hidden_units_,
+                           (void*)padded_embedding_kernel_ptr_,
+                           (void*)(decoder_output_final_buf + hidden_units_offset),
+                           (void*)(logits_buf_ + vocab_size_units_offset)); fflush(stdout);
                     cublas_wrapper_->Gemm(CUBLAS_OP_T,
                                           CUBLAS_OP_N,
                                           vocab_size_padded_,  // n
@@ -1723,6 +1819,15 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                           vocab_size_padded_, /* n */
                                           CUDA_R_32F,
                                           cublasGemmAlgo_t(-1));
+                    {
+                        cudaError_t gemm_err = cudaDeviceSynchronize();
+                        if (gemm_err != cudaSuccess) {
+                            printf("[FT][DEBUG] step=%d: CUDA ERROR after logits GEMM: %s\n",
+                                   step_, cudaGetErrorString(gemm_err)); fflush(stdout);
+                            cudaGetLastError();
+                        }
+                    }
+                    printf("[FT][DEBUG] step=%d: logits GEMM done\n", step_); fflush(stdout);
                     POP_RANGE;
                 }
                 else {
@@ -1832,9 +1937,57 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                 }
 
                 gpu_sync(stream_);
+                // Definitive pre-dynamic_decode sync on ALL streams
+                {
+                    cudaError_t pre_dd = cudaDeviceSynchronize();
+                    if (pre_dd != cudaSuccess) {
+                        printf("[FT][DEBUG] step=%d: *** CUDA ERROR BEFORE dynamic_decode (from post-decoder/logits): %s (code=%d)\n",
+                               step_, cudaGetErrorString(pre_dd), (int)pre_dd); fflush(stdout);
+                        cudaGetLastError();
+                    } else {
+                        printf("[FT][DEBUG] step=%d: pre-dynamic_decode sync CLEAN\n", step_); fflush(stdout);
+                    }
+                }
 
+                // DIAGNOSTIC: greedy argmax on logits to verify model produces valid output
+                {
+                    const float* logits_ptr = logits_buf_ + vocab_size_units_offset;
+                    const int n_check = (int)vocab_size_padded_;
+                    float* h_logits = new float[n_check];
+                    cudaMemcpy(h_logits, logits_ptr, sizeof(float) * n_check, cudaMemcpyDeviceToHost);
+                    float max_val = h_logits[0];
+                    int max_idx = 0;
+                    float min_val = h_logits[0];
+                    float sum_val = 0.0f;
+                    for (int i = 0; i < n_check; i++) {
+                        if (h_logits[i] > max_val) { max_val = h_logits[i]; max_idx = i; }
+                        if (h_logits[i] < min_val) { min_val = h_logits[i]; }
+                        sum_val += h_logits[i];
+                    }
+                    printf("[FT][GREEDY] step=%d: argmax=%d (val=%.4f), min=%.4f, mean=%.6f, logits[0..4]=%.4f %.4f %.4f %.4f %.4f\n",
+                           step_, max_idx, max_val, min_val, sum_val / n_check,
+                           h_logits[0], h_logits[1], h_logits[2], h_logits[3], h_logits[4]);
+                    fflush(stdout);
+                    delete[] h_logits;
+                }
+
+                printf("[FT][DEBUG] step=%d: about to call dynamic_decode (is_init_rand=%d)\n",
+                       step_, (int)(step_ == max_context_len)); fflush(stdout);
                 PUSH_RANGE("result sampling and stop check");
                 dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
+
+                // Definitive post-dynamic_decode sync
+                {
+                    cudaError_t post_dd = cudaDeviceSynchronize();
+                    if (post_dd != cudaSuccess) {
+                        printf("[FT][DEBUG] step=%d: *** CUDA ERROR AFTER dynamic_decode: %s (code=%d)\n",
+                               step_, cudaGetErrorString(post_dd), (int)post_dd); fflush(stdout);
+                        cudaGetLastError();
+                    } else {
+                        printf("[FT][DEBUG] step=%d: post-dynamic_decode sync CLEAN\n", step_); fflush(stdout);
+                    }
+                }
+                printf("[FT][DEBUG] step=%d: dynamic_decode COMPLETED\n", step_); fflush(stdout);
                 generation_should_stop &= subbatch_should_stop;
                 microbatch_should_stop_[ite] = subbatch_should_stop;
                 printf("MICROBATCH_SHOULD_STOP IS %d\n", microbatch_should_stop_[ite]);
@@ -1904,6 +2057,8 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
             /* We have just finished processing input: update the padding count:
              * total_padding_count += (max_input_length - input_lengths) */
 
+            printf("[FT][DEBUG] step=%d: calling invokeUpdatePaddingCount (max_input_length=%d)\n",
+                   step_, max_input_length); fflush(stdout);
             PUSH_RANGE("Update padding count");
             invokeUpdatePaddingCount(tiled_total_padding_count_,
                                      input_tensors->at("input_lengths").getPtr<int>(),
@@ -1912,14 +2067,35 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                                      beam_width,
                                      stream_);
             POP_RANGE;
+            {
+                cudaError_t upc_err = cudaStreamSynchronize(stream_);
+                if (upc_err != cudaSuccess) {
+                    printf("[FT][DEBUG] step=%d: *** CUDA ERROR after invokeUpdatePaddingCount: %s\n",
+                           step_, cudaGetErrorString(upc_err)); fflush(stdout);
+                    cudaGetLastError();
+                }
+            }
         }
 
         if (generation_should_stop) {
             break;
         }
 
+        // Check for CUDA errors at end of every step (debug)
+        {
+            cudaError_t step_err = cudaDeviceSynchronize();
+            if (step_err != cudaSuccess) {
+                printf("[FT][DEBUG] step=%d: END-OF-STEP CUDA ERROR: %s\n",
+                       step_, cudaGetErrorString(step_err)); fflush(stdout);
+                cudaGetLastError();  // attempt to clear
+            }
+            cudaError_t last_err = cudaGetLastError();
+            if (last_err != cudaSuccess) {
+                printf("[FT][DEBUG] step=%d: END-OF-STEP LAST ERROR: %s\n",
+                       step_, cudaGetErrorString(last_err)); fflush(stdout);
+            }
+        }
         if (step_ == max_input_length) {
-            CUDACHECK(cudaDeviceSynchronize());
             total_startt = high_resolution_clock::now();
         }
 

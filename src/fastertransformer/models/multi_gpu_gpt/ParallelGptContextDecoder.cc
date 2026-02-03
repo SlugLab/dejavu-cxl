@@ -29,7 +29,14 @@ template<typename T>
 void ParallelGptContextDecoder<T>::gpu_sync(cudaStream_t stream)
 {
 #ifdef STREAM_SYNC
-    cudaStreamSynchronize(stream);
+    cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        printf("[FT][CTX_SYNC] CUDA ERROR in context decoder gpu_sync: %s (code=%d)\n",
+               cudaGetErrorString(err), (int)err);
+        fflush(stdout);
+        cudaGetLastError();  // clear
+        throw std::runtime_error(std::string("[FT] CUDA error in context decoder gpu_sync: ") + cudaGetErrorString(err));
+    }
 #else
     sync_check_cuda_error();
 #endif
@@ -44,13 +51,13 @@ void ParallelGptContextDecoder<T>::initialize()
     const bool is_gqa = (num_kv_heads_ != head_num_);
 
     if (is_gqa) {
-        // Use GQA constructor with separate kv_head_num
+        // Use GQA constructor with separate kv_head_num and RoPE
         self_attention_layer_ = new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
                                                                               max_seq_len_,
                                                                               head_num_,
                                                                               num_kv_heads_,
                                                                               size_per_head_,
-                                                                              0,  // rotary_embedding_dim
+                                                                              rotary_embedding_dim_,
                                                                               false,  // neox_rotary_style
                                                                               tensor_para_,
                                                                               stream_,
@@ -66,11 +73,13 @@ void ParallelGptContextDecoder<T>::initialize()
                                                                               hidden_units_);
     }
     else {
-        // Use standard MHA constructor
+        // Use MHA constructor with RoPE support
         self_attention_layer_ = new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
                                                                               max_seq_len_,
                                                                               head_num_,
                                                                               size_per_head_,
+                                                                              rotary_embedding_dim_,
+                                                                              false,  // neox_rotary_style
                                                                               tensor_para_,
                                                                               stream_,
                                                                               cublas_wrapper_,
@@ -85,7 +94,7 @@ void ParallelGptContextDecoder<T>::initialize()
                                                                               hidden_units_);
     }
 
-    bool use_gated_activation = activation_type_ == ActivationType::GeGLU || activation_type_ == ActivationType::ReGLU;
+    bool use_gated_activation = activation_type_ == ActivationType::GeGLU || activation_type_ == ActivationType::ReGLU || activation_type_ == ActivationType::SiGLU;
     size_t max_inter_size     = has_adapters_ ? std::max(inter_size_, adapter_inter_size_) : inter_size_;
     if (activation_type_ == ActivationType::Gelu || activation_type_ == ActivationType::GeGLU) {
         ffn_layer_ = new TensorParallelGeluFfnLayer<T>(max_batch_size_,
@@ -334,6 +343,7 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(size_t               max
     layernorm_eps_(layernorm_eps),
     layernorm_type_(gpt_variant_params.layernorm_type),
     activation_type_(gpt_variant_params.activation_type),
+    rotary_embedding_dim_(!gpt_variant_params.has_positional_encoding ? size_per_head : 0),
     adapter_inter_size_(gpt_variant_params.adapter_inter_size),
     has_adapters_(gpt_variant_params.has_adapters),
     hidden_units_(hidden_size > 0 ? hidden_size : head_num_ * size_per_head),
@@ -374,6 +384,7 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(ParallelGptContextDecode
     layernorm_eps_(decoder.layernorm_eps_),
     layernorm_type_(decoder.layernorm_type_),
     activation_type_(decoder.activation_type_),
+    rotary_embedding_dim_(decoder.rotary_embedding_dim_),
     adapter_inter_size_(decoder.adapter_inter_size_),
     has_adapters_(decoder.has_adapters_),
     hidden_units_(decoder.hidden_units_),
@@ -790,19 +801,30 @@ void ParallelGptContextDecoder<T>::forward(
 
             PUSH_RANGE("pre-mha layernorm");
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
-                // Use opt_version=0 to disable optimized kernel that might have issues
-                invokeGeneralLayerNorm(decoder_normed_input_,
-                                       decoder_input,
-                                       layer_weight->pre_layernorm_weights.gamma,
-                                       layer_weight->pre_layernorm_weights.beta,
-                                       layernorm_eps_,
-                                       h_token_num,
-                                       hidden_units_,
-                                       const_cast<float*>(layer_weight->self_attention_weights.query_weight.scale),
-                                       nullptr,
-                                       int8_mode_,
-                                       stream_,
-                                       0);  // opt_version=0 to use simple kernel
+                if (layer_weight->pre_layernorm_weights.beta == nullptr) {
+                    // RMSNorm (T5-style): no mean subtraction, no bias (Qwen3, LLaMA, etc.)
+                    invokeGeneralT5LayerNorm(decoder_normed_input_,
+                                             decoder_input,
+                                             layer_weight->pre_layernorm_weights.gamma,
+                                             (const T*)nullptr,
+                                             layernorm_eps_,
+                                             h_token_num,
+                                             hidden_units_,
+                                             stream_);
+                } else {
+                    invokeGeneralLayerNorm(decoder_normed_input_,
+                                           decoder_input,
+                                           layer_weight->pre_layernorm_weights.gamma,
+                                           layer_weight->pre_layernorm_weights.beta,
+                                           layernorm_eps_,
+                                           h_token_num,
+                                           hidden_units_,
+                                           const_cast<float*>(layer_weight->self_attention_weights.query_weight.scale),
+                                           nullptr,
+                                           int8_mode_,
+                                           stream_,
+                                           0);
+                }
             }
 
             POP_RANGE;
@@ -995,6 +1017,20 @@ void ParallelGptContextDecoder<T>::forward(
             ffn_layer_->resetInterSize(inter_size_ / tensor_para_.world_size_);
             ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
 
+#ifdef STREAM_SYNC
+            {
+                cudaError_t ffn_err = cudaStreamSynchronize(stream_);
+                if (ffn_err != cudaSuccess) {
+                    printf("[FT][CTX_SYNC] CUDA ERROR after FFN/MoE at layer %u (moe=%d): %s (code=%d)\n",
+                           l, use_moe ? 1 : 0, cudaGetErrorString(ffn_err), (int)ffn_err);
+                    fflush(stdout);
+                    cudaGetLastError();
+                    throw std::runtime_error(std::string("[FT] CUDA error in context decoder FFN layer ") +
+                                             std::to_string(l) + ": " + cudaGetErrorString(ffn_err));
+                }
+            }
+#endif
+
             // Delta checkpoint after MoE computation
             // Note: Delta checkpoint integration requires proper initialization via
             // setDeltaCheckpointManager() and enableDeltaCheckpoint() before use.
@@ -1150,18 +1186,29 @@ void ParallelGptContextDecoder<T>::forward(
                                       hidden_units_,
                                       stream_);
                     }
-                    // Use opt_version=0 for RMSNorm (nullptr beta)
-                    invokeGeneralLayerNorm(decoder_output,
-                                           decoder_output,
-                                           layer_weight->self_attn_layernorm_weights.gamma,
-                                           layer_weight->self_attn_layernorm_weights.beta,
-                                           layernorm_eps_,
-                                           h_token_num,
-                                           hidden_units_,
-                                           (float*)nullptr,
-                                           0,
-                                           stream_,
-                                           layer_weight->self_attn_layernorm_weights.beta ? 2 : 0);
+                    if (layer_weight->self_attn_layernorm_weights.beta == nullptr) {
+                        // RMSNorm (T5-style): no mean subtraction, no bias
+                        invokeGeneralT5LayerNorm(decoder_output,
+                                                 decoder_output,
+                                                 layer_weight->self_attn_layernorm_weights.gamma,
+                                                 (const T*)nullptr,
+                                                 layernorm_eps_,
+                                                 h_token_num,
+                                                 hidden_units_,
+                                                 stream_);
+                    } else {
+                        invokeGeneralLayerNorm(decoder_output,
+                                               decoder_output,
+                                               layer_weight->self_attn_layernorm_weights.gamma,
+                                               layer_weight->self_attn_layernorm_weights.beta,
+                                               layernorm_eps_,
+                                               h_token_num,
+                                               hidden_units_,
+                                               (float*)nullptr,
+                                               0,
+                                               stream_,
+                                               2);
+                    }
                 }
             }
             gpu_sync(stream_);

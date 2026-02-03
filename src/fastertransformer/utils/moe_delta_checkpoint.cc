@@ -29,8 +29,18 @@ namespace fastertransformer {
 DeltaRingBuffer::DeltaRingBuffer(size_t capacity)
     : buffer_(nullptr), capacity_(capacity), head_(0), tail_(0)
 {
-    cudaMalloc(&buffer_, capacity);
-    FT_LOG_INFO("DeltaRingBuffer: allocated %zu MB", capacity / (1024 * 1024));
+    cudaError_t err = cudaMalloc(&buffer_, capacity);
+    if (err != cudaSuccess) {
+        printf("[FT][DeltaRingBuffer] ERROR: cudaMalloc(%zu MB) failed: %s\n",
+               capacity / (1024 * 1024), cudaGetErrorString(err));
+        buffer_ = nullptr;
+        capacity_ = 0;
+        // Clear the error so it doesn't poison subsequent CUDA calls
+        cudaGetLastError();
+    } else {
+        printf("[FT][DeltaRingBuffer] allocated %zu MB at %p\n",
+               capacity / (1024 * 1024), buffer_);
+    }
 }
 
 DeltaRingBuffer::~DeltaRingBuffer()
@@ -45,18 +55,40 @@ void* DeltaRingBuffer::allocate(size_t size)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Check if buffer was allocated
+    if (buffer_ == nullptr || capacity_ == 0) {
+        printf("[FT][DeltaRingBuffer] ERROR: allocate(%zu) called on null/empty buffer\n", size);
+        return nullptr;
+    }
+
     // Align size to 256 bytes for efficient GPU access
     size = (size + 255) & ~255;
 
+    if (size > capacity_) {
+        printf("[FT][DeltaRingBuffer] ERROR: allocation %zu exceeds buffer capacity %zu\n", size, capacity_);
+        return nullptr;
+    }
+
     if (size > getFreeSize()) {
-        FT_LOG_WARNING("DeltaRingBuffer: not enough space, wrapping around");
+        printf("[FT][DeltaRingBuffer] WARNING: not enough space (need %zu, free %zu), resetting\n",
+               size, getFreeSize());
         // Reset buffer (losing old data)
         head_ = 0;
         tail_ = 0;
     }
 
+    // Ensure the allocation doesn't wrap around the buffer boundary
+    // (cudaMemcpy expects contiguous memory)
+    if (head_ + size > capacity_) {
+        // Not enough contiguous space at the end, wrap to beginning
+        printf("[FT][DeltaRingBuffer] INFO: wrapping allocation to beginning (head=%zu, size=%zu, cap=%zu)\n",
+               head_, size, capacity_);
+        head_ = 0;
+        tail_ = 0;  // Reset to avoid fragmentation
+    }
+
     void* ptr = static_cast<char*>(buffer_) + head_;
-    head_ = (head_ + size) % capacity_;
+    head_ = head_ + size;  // No modulo needed since we ensured head_ + size <= capacity_
 
     return ptr;
 }
@@ -120,13 +152,36 @@ void MoEDeltaCheckpointManager::initialize()
 
     // Host pool uses pinned memory
     void* host_buffer = nullptr;
-    cudaMallocHost(&host_buffer, host_pool_bytes);
+    cudaError_t err = cudaMallocHost(&host_buffer, host_pool_bytes);
+    if (err != cudaSuccess) {
+        printf("[FT][Checkpoint] WARNING: cudaMallocHost(%zu MB) failed: %s\n",
+               host_pool_bytes / (1024 * 1024), cudaGetErrorString(err));
+        cudaGetLastError();  // Clear the error
+    }
     // Note: host_pool_ would need different implementation for host memory
     // For now, we use device pool only
 
     // Create CUDA streams
-    cudaStreamCreate(&checkpoint_stream_);
-    cudaStreamCreate(&recovery_stream_);
+    err = cudaStreamCreate(&checkpoint_stream_);
+    if (err != cudaSuccess) {
+        printf("[FT][Checkpoint] WARNING: cudaStreamCreate(checkpoint) failed: %s\n",
+               cudaGetErrorString(err));
+        checkpoint_stream_ = nullptr;
+        cudaGetLastError();
+    }
+    err = cudaStreamCreate(&recovery_stream_);
+    if (err != cudaSuccess) {
+        printf("[FT][Checkpoint] WARNING: cudaStreamCreate(recovery) failed: %s\n",
+               cudaGetErrorString(err));
+        recovery_stream_ = nullptr;
+        cudaGetLastError();
+    }
+
+    // Report GPU memory after checkpoint initialization
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[FT][Checkpoint] GPU memory after init: free=%zu MB, total=%zu MB, used=%zu MB\n",
+           free_mem / (1024 * 1024), total_mem / (1024 * 1024), (total_mem - free_mem) / (1024 * 1024));
 
     FT_LOG_INFO("MoE Delta Checkpoint Manager initialized: device_pool=%zu MB",
                 device_pool_bytes / (1024 * 1024));
@@ -280,17 +335,30 @@ void MoEDeltaCheckpointManager::createKVCacheDelta(
            step, layer_id, seq_start, seq_end, num_new_tokens, delta_size);
 
     // Copy delta from cache to checkpoint (no offset needed, pointer is already positioned)
-    cudaMemcpyAsync(checkpoint->key_cache_delta,
+    cudaError_t cpy_err;
+    cpy_err = cudaMemcpyAsync(checkpoint->key_cache_delta,
                    key_cache,
                    delta_size,
                    cudaMemcpyDeviceToDevice,
                    stream);
+    if (cpy_err != cudaSuccess) {
+        printf("[FT][Checkpoint] ERROR: key cudaMemcpyAsync failed: %s (dst=%p, src=%p, size=%zu)\n",
+               cudaGetErrorString(cpy_err), checkpoint->key_cache_delta, key_cache, delta_size);
+        freeCheckpoint(checkpoint);
+        return;
+    }
 
-    cudaMemcpyAsync(checkpoint->value_cache_delta,
+    cpy_err = cudaMemcpyAsync(checkpoint->value_cache_delta,
                    value_cache,
                    delta_size,
                    cudaMemcpyDeviceToDevice,
                    stream);
+    if (cpy_err != cudaSuccess) {
+        printf("[FT][Checkpoint] ERROR: value cudaMemcpyAsync failed: %s (dst=%p, src=%p, size=%zu)\n",
+               cudaGetErrorString(cpy_err), checkpoint->value_cache_delta, value_cache, delta_size);
+        freeCheckpoint(checkpoint);
+        return;
+    }
 
     // Add to checkpoint list (prepend - newest first)
     MoEDeltaCheckpoint*& head = checkpoints_[ubatch_id][layer_id];

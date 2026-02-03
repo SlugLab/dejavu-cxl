@@ -50,6 +50,9 @@ private:
     LayerNormType        layernorm_type_;
     ActivationType       activation_type_;
 
+    // RoPE
+    size_t               rotary_embedding_dim_ = 0;
+
     // adapter
     bool   has_adapters_;
     size_t adapter_inter_size_;

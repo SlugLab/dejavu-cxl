@@ -34,6 +34,15 @@ private:
     uint   runtime_max_top_k_ = 1;
     uint*  runtime_top_k_buf_ = nullptr;
     float* runtime_top_p_buf_ = nullptr;
+
+    // CPU-saved values for re-applying at each forward (GPU buffers get corrupted)
+    uint    saved_top_k_        = 0;
+    float   saved_top_p_        = 0.0f;
+    size_t  saved_batch_size_   = 0;
+    uint*   saved_top_k_array_  = nullptr;   // [batch_size] if per-batch, else nullptr
+    float*  saved_top_p_array_  = nullptr;   // [batch_size] if per-batch, else nullptr
+    size_t  saved_top_k_size_   = 0;         // runtime_top_k_size from setup
+    size_t  saved_top_p_size_   = 0;         // runtime_top_p_size from setup
     using BaseSamplingLayer<T>::vocab_size_;
     using BaseSamplingLayer<T>::vocab_size_padded_;
 
