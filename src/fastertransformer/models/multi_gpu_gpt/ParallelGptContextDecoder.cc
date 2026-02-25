@@ -58,7 +58,7 @@ void ParallelGptContextDecoder<T>::initialize()
                                                                               num_kv_heads_,
                                                                               size_per_head_,
                                                                               rotary_embedding_dim_,
-                                                                              false,  // neox_rotary_style
+                                                                              neox_rotary_style_,
                                                                               tensor_para_,
                                                                               stream_,
                                                                               cublas_wrapper_,
@@ -79,7 +79,7 @@ void ParallelGptContextDecoder<T>::initialize()
                                                                               head_num_,
                                                                               size_per_head_,
                                                                               rotary_embedding_dim_,
-                                                                              false,  // neox_rotary_style
+                                                                              neox_rotary_style_,
                                                                               tensor_para_,
                                                                               stream_,
                                                                               cublas_wrapper_,
@@ -344,6 +344,7 @@ ParallelGptContextDecoder<T>::ParallelGptContextDecoder(size_t               max
     layernorm_type_(gpt_variant_params.layernorm_type),
     activation_type_(gpt_variant_params.activation_type),
     rotary_embedding_dim_(!gpt_variant_params.has_positional_encoding ? size_per_head : 0),
+    neox_rotary_style_(gpt_variant_params.neox_rotary_style),
     adapter_inter_size_(gpt_variant_params.adapter_inter_size),
     has_adapters_(gpt_variant_params.has_adapters),
     hidden_units_(hidden_size > 0 ? hidden_size : head_num_ * size_per_head),
@@ -799,6 +800,46 @@ void ParallelGptContextDecoder<T>::forward(
                 POP_RANGE;
             }
 
+            // DIAGNOSTIC: Print hidden state norms at key layers
+            if (l == 0 || l == 1 || l == num_layer_ / 2 || l == num_layer_ - 1) {
+                // Copy a small slice to CPU to compute norm
+                std::vector<float> h_vals(hidden_units_);
+                // Get last position's hidden state: decoder_input[(h_token_num-1)*hidden_units_]
+                cudaMemcpyAsync(h_vals.data(),
+                               decoder_input + (h_token_num - 1) * hidden_units_,
+                               hidden_units_ * sizeof(T),
+                               cudaMemcpyDeviceToHost, stream_);
+                cudaStreamSynchronize(stream_);
+                // If T is half, we need to convert
+                float norm = 0.0f;
+                bool has_nan = false, has_inf = false;
+                if constexpr (std::is_same<T, half>::value) {
+                    const half* hp = reinterpret_cast<const half*>(h_vals.data());
+                    std::vector<float> fvals(hidden_units_);
+                    for (size_t i = 0; i < hidden_units_; i++) {
+                        fvals[i] = __half2float(hp[i]);
+                        norm += fvals[i] * fvals[i];
+                        if (std::isnan(fvals[i])) has_nan = true;
+                        if (std::isinf(fvals[i])) has_inf = true;
+                    }
+                    norm = sqrtf(norm);
+                    printf("[FT][CTX_DIAG] Layer %u input (last pos): norm=%.4f, NaN=%d, Inf=%d, first8=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
+                           l, norm, has_nan, has_inf,
+                           fvals[0], fvals[1], fvals[2], fvals[3], fvals[4], fvals[5], fvals[6], fvals[7]);
+                } else {
+                    for (size_t i = 0; i < hidden_units_; i++) {
+                        norm += h_vals[i] * h_vals[i];
+                        if (std::isnan(h_vals[i])) has_nan = true;
+                        if (std::isinf(h_vals[i])) has_inf = true;
+                    }
+                    norm = sqrtf(norm);
+                    printf("[FT][CTX_DIAG] Layer %u input (last pos): norm=%.4f, NaN=%d, Inf=%d, first8=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
+                           l, norm, has_nan, has_inf,
+                           h_vals[0], h_vals[1], h_vals[2], h_vals[3], h_vals[4], h_vals[5], h_vals[6], h_vals[7]);
+                }
+                fflush(stdout);
+            }
+
             PUSH_RANGE("pre-mha layernorm");
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
                 if (layer_weight->pre_layernorm_weights.beta == nullptr) {
@@ -943,27 +984,72 @@ void ParallelGptContextDecoder<T>::forward(
             }
 
             if (layernorm_type_ == LayerNormType::pre_layernorm) {
-                // Use opt_version=0 to handle null beta (RMSNorm) properly
-                invokeGeneralAddBiasResidualPreLayerNorm(
-                    has_adapters_ ? after_adapter_attn_output_ : self_attn_output_,
-                    normed_self_attn_output_,
-                    has_adapters_ ? after_adapter_attn_output_ : self_attn_output_,
-                    decoder_input,
-                    has_adapters_ ? self_attn_output_ : nullptr,
-                    layer_weight->self_attn_layernorm_weights.gamma,
-                    layer_weight->self_attn_layernorm_weights.beta,
-                    has_adapters_ ? layer_weight->after_attention_adapter_weights.output_weight.bias :
-                                    layer_weight->self_attention_weights.attention_output_weight.bias,
-                    layernorm_eps_,
-                    h_token_num,
-                    hidden_units_,
-                    nullptr,
-                    nullptr,
-                    const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
-                    nullptr,  // NOTE (perkzz): dynamic_quant_ ? ffn_intermediate_dynamic_scale_ : nullptr,
-                    int8_mode_,
-                    stream_,
-                    0);  // opt_version=0 for null beta support
+                if (layer_weight->self_attn_layernorm_weights.beta == nullptr) {
+                    // RMSNorm path (Qwen3, LLaMA, etc.)
+                    // The fused generalAddBiasResidualLayerNorm kernel always uses standard LayerNorm
+                    // (with mean subtraction), which is wrong for RMSNorm models.
+                    // Use invokeGeneralAddResidualT5PreLayerNorm which does proper RMSNorm.
+                    T* attn_out = has_adapters_ ? after_adapter_attn_output_ : self_attn_output_;
+                    const T* attn_bias = has_adapters_ ?
+                        layer_weight->after_attention_adapter_weights.output_weight.bias :
+                        layer_weight->self_attention_weights.attention_output_weight.bias;
+
+                    if (!has_adapters_ && attn_bias == nullptr) {
+                        // Optimized fused path: residual add + RMSNorm in one kernel
+                        // output = decoder_input + attn_out, norm_output = RMSNorm(output)
+                        invokeGeneralAddResidualT5PreLayerNorm(
+                            attn_out,
+                            normed_self_attn_output_,
+                            decoder_input,
+                            layer_weight->self_attn_layernorm_weights.gamma,
+                            layernorm_eps_,
+                            h_token_num,
+                            hidden_units_,
+                            stream_);
+                    } else {
+                        // General path with adapters/bias: separate residual add, then RMSNorm
+                        invokeAddBiasResidual(attn_out,
+                                              attn_out,
+                                              decoder_input,
+                                              has_adapters_ ? self_attn_output_ : (const T*)nullptr,
+                                              attn_bias,
+                                              (const float*)nullptr,
+                                              (const float*)nullptr,
+                                              h_token_num,
+                                              hidden_units_,
+                                              stream_);
+                        invokeGeneralT5LayerNorm(normed_self_attn_output_,
+                                                 attn_out,
+                                                 layer_weight->self_attn_layernorm_weights.gamma,
+                                                 (const T*)nullptr,
+                                                 layernorm_eps_,
+                                                 h_token_num,
+                                                 hidden_units_,
+                                                 stream_);
+                    }
+                } else {
+                    // Standard LayerNorm path
+                    invokeGeneralAddBiasResidualPreLayerNorm(
+                        has_adapters_ ? after_adapter_attn_output_ : self_attn_output_,
+                        normed_self_attn_output_,
+                        has_adapters_ ? after_adapter_attn_output_ : self_attn_output_,
+                        decoder_input,
+                        has_adapters_ ? self_attn_output_ : nullptr,
+                        layer_weight->self_attn_layernorm_weights.gamma,
+                        layer_weight->self_attn_layernorm_weights.beta,
+                        has_adapters_ ? layer_weight->after_attention_adapter_weights.output_weight.bias :
+                                        layer_weight->self_attention_weights.attention_output_weight.bias,
+                        layernorm_eps_,
+                        h_token_num,
+                        hidden_units_,
+                        nullptr,
+                        nullptr,
+                        const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
+                        nullptr,
+                        int8_mode_,
+                        stream_,
+                        0);
+                }
             }
             else if (layernorm_type_ == LayerNormType::post_layernorm) {
                 invokeAddBiasResidualLayerNorm(after_adapter_attn_output_,

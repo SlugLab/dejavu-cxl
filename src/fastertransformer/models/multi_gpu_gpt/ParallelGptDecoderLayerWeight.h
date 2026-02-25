@@ -48,6 +48,9 @@ struct gptVariantParams {
     size_t adapter_inter_size = 0;
     // Whether to use the attention linear positional bias
     bool use_attention_linear_bias = false;
+    // Whether to use NeoX-style (half-split) rotary embeddings instead of GPT-J style (adjacent pairs).
+    // Qwen, LLaMA, Mistral and most modern models use NeoX-style.
+    bool neox_rotary_style = false;
 };
 
 template<typename T>

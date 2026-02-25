@@ -298,6 +298,31 @@ public:
 
         weight_offset += layer_num_;
 
+        // QKNorm weights (per-head RMSNorm for Q and K, used by Qwen3)
+        for (int i = 0; i < (int)layer_num_; i++) {
+            const T* q_norm_ptr = get_ptr<T>(weights_[12 * layer_num_ + weight_offset + i]);
+            if (weights_[12 * layer_num_ + weight_offset + i].numel() > 0) {
+                gpt_weights_.decoder_layer_weights[i]->self_attention_weights.q_norm_weight = q_norm_ptr;
+                if (i == 0) {
+                    fprintf(stderr, "[FT][CTOR] QKNorm: Layer 0 q_norm_weight loaded (%ld elements)\n",
+                            (long)weights_[12 * layer_num_ + weight_offset + i].numel());
+                }
+            }
+        }
+        weight_offset += layer_num_;
+
+        for (int i = 0; i < (int)layer_num_; i++) {
+            const T* k_norm_ptr = get_ptr<T>(weights_[12 * layer_num_ + weight_offset + i]);
+            if (weights_[12 * layer_num_ + weight_offset + i].numel() > 0) {
+                gpt_weights_.decoder_layer_weights[i]->self_attention_weights.k_norm_weight = k_norm_ptr;
+                if (i == 0) {
+                    fprintf(stderr, "[FT][CTOR] QKNorm: Layer 0 k_norm_weight loaded (%ld elements)\n",
+                            (long)weights_[12 * layer_num_ + weight_offset + i].numel());
+                }
+            }
+        }
+        weight_offset += layer_num_;
+
         if (gpt_variant_params_.has_adapters) {
             for (int i = 0; i < (int)layer_num_; i++) {
                 gpt_weights_.decoder_layer_weights[i]->after_attention_adapter_weights.intermediate_weight.kernel =
@@ -898,12 +923,30 @@ public:
                 {"runtime_top_p", convert_tensor<float>(top_p_opt.value(), ft::MemoryType::MEMORY_CPU)});
         }
         if (top_k_opt.has_value()) {
+            auto top_k_tensor = top_k_opt.value();
+            printf("[FT][FTGpt] top_k_opt has value: numel=%ld, dtype=%d\n",
+                   (long)top_k_tensor.numel(), (int)top_k_tensor.scalar_type()); fflush(stdout);
+            if (top_k_tensor.numel() > 0) {
+                // Read as int32 since PyTorch tensor is kInt32
+                int top_k_val = top_k_tensor.item<int>();
+                printf("[FT][FTGpt] top_k value from PyTorch tensor: %d\n", top_k_val); fflush(stdout);
+            }
             input_tensors.insert(
-                {"runtime_top_k", convert_tensor<uint>(top_k_opt.value(), ft::MemoryType::MEMORY_CPU)});
+                {"runtime_top_k", convert_tensor<uint>(top_k_tensor, ft::MemoryType::MEMORY_CPU)});
+        } else {
+            printf("[FT][FTGpt] WARNING: top_k_opt has NO value!\n"); fflush(stdout);
         }
         if (temperature_opt.has_value()) {
+            auto temp_tensor = temperature_opt.value();
+            printf("[FT][FTGpt] temperature_opt has value: numel=%ld\n", (long)temp_tensor.numel()); fflush(stdout);
+            if (temp_tensor.numel() > 0) {
+                float temp_val = temp_tensor.item<float>();
+                printf("[FT][FTGpt] temperature value from PyTorch tensor: %f\n", temp_val); fflush(stdout);
+            }
             input_tensors.insert(
-                {"temperature", convert_tensor<float>(temperature_opt.value(), ft::MemoryType::MEMORY_CPU)});
+                {"temperature", convert_tensor<float>(temp_tensor, ft::MemoryType::MEMORY_CPU)});
+        } else {
+            printf("[FT][FTGpt] WARNING: temperature_opt has NO value!\n"); fflush(stdout);
         }
         if (len_penalty_opt.has_value()) {
             input_tensors.insert(
@@ -1111,6 +1154,7 @@ public:
                   const bool                 has_adapters,
                   const int64_t              adapter_inter_size,
                   const bool                 use_attention_linear_bias,
+                  const bool                 neox_rotary_style,
                   const vector<th::Tensor>   weights,
                   const vector<th::Tensor>   int8_weights,
                   const vector<th::Tensor>   scale,

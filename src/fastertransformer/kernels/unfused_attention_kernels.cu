@@ -2639,4 +2639,97 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA(__nv_bfloat16);
 #endif
 #undef INSTANTIATEADDFUSEDQKVBIASTRANSPOSEGQA
 
+// ======================== QKNorm (per-head RMSNorm on Q and K) ========================
+// Qwen3 and similar models apply RMSNorm to each head of Q and K after the QKV projection
+// and before RoPE. This kernel operates on the fused QKV buffer in-place.
+//
+// qkv_buf layout per token: [Q(head_num * size_per_head), K(head_num * size_per_head), V(head_num * size_per_head)]
+// One thread block per (token, head, Q_or_K) tuple.
+
+template<typename T>
+__global__ void qkNormKernel(T*       qkv_buf,        // [num_tokens, 3 * head_num * size_per_head]
+                              const T* q_norm_weight,   // [size_per_head]
+                              const T* k_norm_weight,   // [size_per_head]
+                              const int num_tokens,
+                              const int head_num,
+                              const int size_per_head,
+                              const float eps)
+{
+    // blockIdx.x encodes (token_idx, head_idx, qk_idx)
+    const int idx       = blockIdx.x;
+    const int qk_idx    = idx % 2;                  // 0 = Q, 1 = K
+    const int head_idx  = (idx / 2) % head_num;
+    const int token_idx = idx / (2 * head_num);
+
+    if (token_idx >= num_tokens) return;
+
+    const int hidden_units = head_num * size_per_head;
+    const int row_offset   = token_idx * 3 * hidden_units;
+
+    // Q starts at row_offset + 0, K starts at row_offset + hidden_units
+    T*       data        = qkv_buf + row_offset + qk_idx * hidden_units + head_idx * size_per_head;
+    const T* norm_weight = (qk_idx == 0) ? q_norm_weight : k_norm_weight;
+
+    // Compute sum of squares for RMSNorm
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < size_per_head; i += blockDim.x) {
+        float val = (float)data[i];
+        sum_sq += val * val;
+    }
+
+    // Block-level reduction
+    sum_sq = blockReduceSum(sum_sq);
+
+    // Broadcast via shared memory
+    __shared__ float s_inv_rms;
+    if (threadIdx.x == 0) {
+        float rms = sqrtf(sum_sq / (float)size_per_head + eps);
+        s_inv_rms = 1.0f / rms;
+    }
+    __syncthreads();
+
+    const float inv_rms = s_inv_rms;
+
+    // Apply RMSNorm: y = x * weight / rms
+    for (int i = threadIdx.x; i < size_per_head; i += blockDim.x) {
+        float val = (float)data[i];
+        float w   = (float)norm_weight[i];
+        data[i]   = (T)(val * inv_rms * w);
+    }
+}
+
+template<typename T>
+void invokeQKNorm(T*           qkv_buf,
+                  const T*     q_norm_weight,
+                  const T*     k_norm_weight,
+                  const int    num_tokens,
+                  const int    head_num,
+                  const int    size_per_head,
+                  const float  eps,
+                  cudaStream_t stream)
+{
+    // One block per (token, head, Q_or_K)
+    const int num_blocks  = num_tokens * head_num * 2;
+    const int num_threads = min(size_per_head, 256);
+
+    qkNormKernel<T><<<num_blocks, num_threads, 0, stream>>>(
+        qkv_buf, q_norm_weight, k_norm_weight, num_tokens, head_num, size_per_head, eps);
+}
+
+#define INSTANTIATE_INVOKE_QK_NORM(T)                     \
+    template void invokeQKNorm(T*           qkv_buf,      \
+                               const T*     q_norm_weight, \
+                               const T*     k_norm_weight, \
+                               const int    num_tokens,    \
+                               const int    head_num,      \
+                               const int    size_per_head, \
+                               const float  eps,           \
+                               cudaStream_t stream)
+INSTANTIATE_INVOKE_QK_NORM(float);
+INSTANTIATE_INVOKE_QK_NORM(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_QK_NORM(__nv_bfloat16);
+#endif
+#undef INSTANTIATE_INVOKE_QK_NORM
+
 }  // namespace fastertransformer

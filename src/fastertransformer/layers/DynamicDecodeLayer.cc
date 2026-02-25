@@ -571,6 +571,40 @@ bool DynamicDecodeLayer<T>::hasDiffRuntimeArgs(TensorMap* input_tensors)
     return false;
 }
 
+template<typename T>
+size_t DynamicDecodeLayer<T>::getCurandStateSizeBytes(size_t batch_size) const
+{
+    return sizeof(curandState_t) * batch_size;
+}
+
+template<typename T>
+void DynamicDecodeLayer<T>::saveCurandState(void* dst_topk, void* dst_topp, size_t batch_size, cudaStream_t stream) const
+{
+    size_t sz = getCurandStateSizeBytes(batch_size);
+    auto* topk_layer = dynamic_cast<BaseSamplingLayer<T>*>(topk_decode_);
+    auto* topp_layer = dynamic_cast<BaseSamplingLayer<T>*>(topp_decode_);
+    if (topk_layer && topk_layer->getCurandStatePtr() && dst_topk) {
+        cudaMemcpyAsync(dst_topk, topk_layer->getCurandStatePtr(), sz, cudaMemcpyDeviceToDevice, stream);
+    }
+    if (topp_layer && topp_layer->getCurandStatePtr() && dst_topp) {
+        cudaMemcpyAsync(dst_topp, topp_layer->getCurandStatePtr(), sz, cudaMemcpyDeviceToDevice, stream);
+    }
+}
+
+template<typename T>
+void DynamicDecodeLayer<T>::restoreCurandState(const void* src_topk, const void* src_topp, size_t batch_size, cudaStream_t stream)
+{
+    size_t sz = getCurandStateSizeBytes(batch_size);
+    auto* topk_layer = dynamic_cast<BaseSamplingLayer<T>*>(topk_decode_);
+    auto* topp_layer = dynamic_cast<BaseSamplingLayer<T>*>(topp_decode_);
+    if (topk_layer && topk_layer->getCurandStatePtr() && src_topk) {
+        cudaMemcpyAsync(topk_layer->getCurandStatePtr(), src_topk, sz, cudaMemcpyDeviceToDevice, stream);
+    }
+    if (topp_layer && topp_layer->getCurandStatePtr() && src_topp) {
+        cudaMemcpyAsync(topp_layer->getCurandStatePtr(), src_topp, sz, cudaMemcpyDeviceToDevice, stream);
+    }
+}
+
 template class DynamicDecodeLayer<float>;
 template class DynamicDecodeLayer<half>;
 

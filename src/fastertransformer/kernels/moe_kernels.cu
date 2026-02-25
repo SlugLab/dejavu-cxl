@@ -626,6 +626,41 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(
     }
 }
 
+// Normalize top-k expert scales so they sum to 1 per row (norm_topk_prob).
+// Input/output: scales [num_rows, k] - modified in-place.
+// For models like Qwen3 with norm_topk_prob=True, the top-k routing weights
+// must be re-normalized after selection. Without this, with 128 experts and top-8,
+// the sum of selected softmax values is much less than 1.0, severely under-scaling
+// the MoE layer output.
+template<typename T>
+__global__ void normalize_expert_scales_kernel(T* scales, const int num_rows, const int k)
+{
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) {
+        return;
+    }
+
+    float sum = 0.0f;
+    for (int i = 0; i < k; ++i) {
+        sum += (float)scales[row * k + i];
+    }
+
+    if (sum > 0.0f) {
+        const float inv_sum = 1.0f / sum;
+        for (int i = 0; i < k; ++i) {
+            scales[row * k + i] = (T)((float)scales[row * k + i] * inv_sum);
+        }
+    }
+}
+
+template<typename T>
+void normalize_expert_scales(T* scales, const int num_rows, const int k, cudaStream_t stream)
+{
+    const int threads = 256;
+    const int blocks = (num_rows + threads - 1) / threads;
+    normalize_expert_scales_kernel<T><<<blocks, threads, 0, stream>>>(scales, num_rows, k);
+}
+
 // Gated activation kernel for MoE SwiGLU support.
 // Takes FC1 output of shape [num_rows, 2*inter_size] where first half is gate_proj result
 // and second half is up_proj result. Computes SiLU(gate) * up and writes compact output
@@ -725,6 +760,10 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
                                           num_experts,
                                           k,
                                           stream);
+
+    // Re-normalize top-k expert scales to sum to 1 per row (norm_topk_prob).
+    // Critical for models like Qwen3-MoE where top-k << num_experts.
+    normalize_expert_scales(expert_scales, num_rows, k, stream);
 
 #ifndef NDEBUG
     cudaDeviceSynchronize();

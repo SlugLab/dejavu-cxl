@@ -128,6 +128,13 @@ private:
     bool                          enable_delta_checkpoint_  = false;
     bool                          owns_checkpoint_manager_  = false;  // Whether we created the manager
 
+    // CURAND state ring buffer for checkpoint recovery
+    void*  curand_ring_topk_       = nullptr;
+    void*  curand_ring_topp_       = nullptr;
+    size_t curand_ring_max_steps_  = 0;
+    size_t curand_ring_batch_size_ = 0;
+    int    curand_ring_step_start_ = 0;
+
     void allocateBuffer() override;
     void allocateBuffer(size_t batch_size,
                         size_t beam_width,

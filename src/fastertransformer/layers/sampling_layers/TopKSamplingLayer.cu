@@ -149,20 +149,37 @@ void TopKSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     //     repetition_penalty [1] or [batch_size] on cpu, optional
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    printf("[FT][TopK] setup() ENTER: batch_size=%zu, beam_width=%zu, has_runtime_top_k=%d\n",
-           batch_size, beam_width, runtime_args->isExist("runtime_top_k") ? 1 : 0); fflush(stdout);
+    bool has_top_k = runtime_args->isExist("runtime_top_k");
+    bool has_top_p = runtime_args->isExist("runtime_top_p");
+    printf("[FT][TopK] setup() ENTER: batch_size=%zu, beam_width=%zu, has_runtime_top_k=%d, has_runtime_top_p=%d\n",
+           batch_size, beam_width, has_top_k ? 1 : 0, has_top_p ? 1 : 0); fflush(stdout);
     BaseSamplingLayer<T>::setup(batch_size, beam_width, runtime_args);
 
     uint         tmp_top_k     = 0;
-    const Tensor runtime_top_k = runtime_args->isExist("runtime_top_k") ?
+    const Tensor runtime_top_k = has_top_k ?
                                      runtime_args->at("runtime_top_k") :
                                      Tensor(MEMORY_CPU, TYPE_UINT32, {1}, &tmp_top_k);
-    const Tensor runtime_top_p = runtime_args->isExist("runtime_top_p") ? runtime_args->at("runtime_top_p") : Tensor();
+    const Tensor runtime_top_p = has_top_p ? runtime_args->at("runtime_top_p") : Tensor();
     const size_t runtime_top_k_size = runtime_top_k.size();
     const size_t runtime_top_p_size = runtime_top_p.size();
 
+    // Debug: print raw tensor info
+    if (has_top_k) {
+        printf("[FT][TopK] setup(): runtime_top_k tensor: size=%zu, type=%d, data_ptr=%p\n",
+               runtime_top_k.size(), (int)runtime_top_k.type, runtime_top_k.data); fflush(stdout);
+        // Try reading as both int and uint to check for type issues
+        if (runtime_top_k.size() > 0 && runtime_top_k.data != nullptr) {
+            int val_as_int = *reinterpret_cast<const int*>(runtime_top_k.data);
+            uint val_as_uint = *reinterpret_cast<const uint*>(runtime_top_k.data);
+            printf("[FT][TopK] setup(): runtime_top_k raw value: as_int=%d, as_uint=%u\n",
+                   val_as_int, val_as_uint); fflush(stdout);
+        }
+    }
+
     uint  top_k = runtime_top_k.max<uint>();
     float top_p = runtime_top_p_size == 0 ? 0.0f : runtime_top_p.getVal<float>();
+
+    printf("[FT][TopK] setup(): after max<uint>(): top_k=%u, top_p=%f\n", top_k, top_p); fflush(stdout);
 
     // Save CPU-side values so we can re-apply them at each forward call.
     // The GPU buffers (runtime_top_k_buf_, runtime_top_p_buf_) get corrupted
@@ -260,6 +277,10 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
 
     // Re-apply saved CPU-side top_k/top_p values to GPU buffers.
     // The GPU buffers get corrupted by model operations between setup() and forward().
+    printf("[FT][TopK] runSampling step=%d: BEFORE re-apply: saved_top_k_=%u, saved_top_p_=%f, "
+           "saved_batch_size_=%zu, saved_top_k_size_=%zu, saved_top_p_size_=%zu, runtime_max_top_k_=%d\n",
+           step, saved_top_k_, saved_top_p_, saved_batch_size_, saved_top_k_size_, saved_top_p_size_,
+           runtime_max_top_k_); fflush(stdout);
     {
         dim3 block(std::min((int)saved_batch_size_, 256));
         dim3 grid(div_up((int)saved_batch_size_, (int)block.x));
@@ -291,6 +312,12 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
             }
             runtime_max_top_k_ = static_cast<int>(max_k);
         }
+        // Verify GPU buffer after kernel
+        cudaStreamSynchronize(stream_);
+        uint gpu_top_k_val = 0;
+        cudaMemcpy(&gpu_top_k_val, runtime_top_k_buf_, sizeof(uint), cudaMemcpyDeviceToHost);
+        printf("[FT][TopK] runSampling step=%d: AFTER re-apply: runtime_max_top_k_=%d, GPU runtime_top_k_buf_[0]=%u\n",
+               step, runtime_max_top_k_, gpu_top_k_val); fflush(stdout);
     }
 
     invokeAddBiasEndMask(logits,

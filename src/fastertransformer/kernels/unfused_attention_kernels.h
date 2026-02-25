@@ -244,4 +244,17 @@ void invokeAddFusedQKVBiasTransposeGQA(T*           q_buf,
                                        const int    size_per_head,
                                        cudaStream_t stream);
 
+// QKNorm: per-head RMSNorm applied to Q and K portions of fused QKV buffer.
+// Used by Qwen3 and similar models. Applied after QKV projection, before RoPE.
+// qkv_buf layout per token: [Q(head_num * size_per_head), K(head_num * size_per_head), V(head_num * size_per_head)]
+template<typename T>
+void invokeQKNorm(T*           qkv_buf,        // [num_tokens, 3 * head_num * size_per_head], modified in-place
+                  const T*     q_norm_weight,   // [size_per_head]
+                  const T*     k_norm_weight,   // [size_per_head]
+                  const int    num_tokens,
+                  const int    head_num,
+                  const int    size_per_head,
+                  const float  eps,
+                  cudaStream_t stream);
+
 }  // namespace fastertransformer

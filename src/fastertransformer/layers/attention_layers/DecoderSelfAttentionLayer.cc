@@ -16,6 +16,7 @@
 
 #include "src/fastertransformer/layers/attention_layers/DecoderSelfAttentionLayer.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
+#include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/memory_utils.h"
 #include "src/fastertransformer/utils/nvtx_utils.h"
@@ -604,6 +605,20 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
     }
     sync_check_cuda_error();
     POP_RANGE;
+
+    // QKNorm: apply per-head RMSNorm to Q and K before RoPE (Qwen3 and similar models)
+    if (attention_weights->q_norm_weight != nullptr && attention_weights->k_norm_weight != nullptr) {
+        invokeQKNorm(qkv_buf_,
+                     attention_weights->q_norm_weight,
+                     attention_weights->k_norm_weight,
+                     batch_size,
+                     local_head_num_,
+                     size_per_head_,
+                     1e-6f,
+                     stream_);
+        sync_check_cuda_error();
+    }
+
     fusedQKV_masked_attention_dispatch<T>(
         qkv_buf_,
         attention_weights->query_weight.bias,

@@ -28,6 +28,10 @@ struct AttentionWeight {
     DenseWeight<T1, T2> attention_output_weight;
     DenseWeight<T1, T2> ia3_key_weight;
     DenseWeight<T1, T2> ia3_value_weight;
+    // QKNorm: per-head RMSNorm weights for Q and K (shape: [size_per_head]).
+    // Used by Qwen3 and similar models. nullptr if not used.
+    const T1* q_norm_weight = nullptr;
+    const T1* k_norm_weight = nullptr;
 };
 
 }  // namespace fastertransformer

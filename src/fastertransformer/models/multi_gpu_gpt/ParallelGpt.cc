@@ -27,6 +27,7 @@
 #include "src/fastertransformer/utils/nvtx_utils.h"
 
 #include <chrono>
+#include <curand_kernel.h>
 #include <fstream>
 #include <iterator>
 #include <unistd.h>
@@ -255,6 +256,17 @@ void ParallelGpt<T>::allocateBuffer(size_t batch_size,
     tiled_total_padding_count_ =
         (int*)allocator_->reMalloc(tiled_total_padding_count_, batchxbeam * sizeof(int), false);
 
+    // Allocate CURAND state ring buffer for checkpoint recovery
+    if (enable_delta_checkpoint_) {
+        curand_ring_max_steps_  = max_session_len;
+        curand_ring_batch_size_ = batchxbeam;
+        size_t curand_state_bytes = sizeof(curandState_t) * batchxbeam;
+        curand_ring_topk_ = allocator_->reMalloc(curand_ring_topk_, curand_state_bytes * max_session_len, false);
+        curand_ring_topp_ = allocator_->reMalloc(curand_ring_topp_, curand_state_bytes * max_session_len, false);
+        printf("[FT][CURAND] Allocated CURAND ring buffer: %zu steps x %zu batch, %zu bytes each\n",
+               max_session_len, batchxbeam, curand_state_bytes);
+    }
+
     is_allocate_buffer_ = true;
 }
 
@@ -324,6 +336,14 @@ void ParallelGpt<T>::freeBuffer()
             allocator_->free((void**)(&compact_size_));
         }
         allocator_->free((void**)(&tiled_total_padding_count_));
+
+        // Free CURAND state ring buffers
+        if (curand_ring_topk_ != nullptr) {
+            allocator_->free((void**)(&curand_ring_topk_));
+        }
+        if (curand_ring_topp_ != nullptr) {
+            allocator_->free((void**)(&curand_ring_topp_));
+        }
 
         is_allocate_buffer_ = false;
     }
@@ -493,18 +513,29 @@ void ParallelGpt<T>::computeContextCumLogProbs(float*                      cum_l
 
     if (pipeline_para_.rank_ == pipeline_para_.world_size_ - 1) {
         // normed decoder output [batch_size * beam_width, max_input_length, hidden_units_]
-        // Use opt_version=0 for RMSNorm (nullptr beta)
-        invokeGeneralLayerNorm(lp_normed_decoder_output_buf_,
-                               context_decoder_outputs,
-                               gpt_weights->post_decoder_layernorm.gamma,
-                               gpt_weights->post_decoder_layernorm.beta,
-                               layernorm_eps_,
-                               n_hidden_states,
-                               hidden_units_,
-                               (float*)nullptr,
-                               0,
-                               stream_,
-                               gpt_weights->post_decoder_layernorm.beta ? 2 : 0);
+        if (gpt_weights->post_decoder_layernorm.beta == nullptr) {
+            // RMSNorm path (Qwen3, LLaMA, etc.)
+            invokeGeneralT5LayerNorm(lp_normed_decoder_output_buf_,
+                                     context_decoder_outputs,
+                                     gpt_weights->post_decoder_layernorm.gamma,
+                                     (const T*)nullptr,
+                                     layernorm_eps_,
+                                     n_hidden_states,
+                                     hidden_units_,
+                                     stream_);
+        } else {
+            invokeGeneralLayerNorm(lp_normed_decoder_output_buf_,
+                                   context_decoder_outputs,
+                                   gpt_weights->post_decoder_layernorm.gamma,
+                                   gpt_weights->post_decoder_layernorm.beta,
+                                   layernorm_eps_,
+                                   n_hidden_states,
+                                   hidden_units_,
+                                   (float*)nullptr,
+                                   0,
+                                   stream_,
+                                   2);
+        }
         gpu_sync(stream_);
         if (tensor_para_.world_size_ == 1) {
             float alpha = 1.0f;
@@ -528,6 +559,37 @@ void ParallelGpt<T>::computeContextCumLogProbs(float*                      cum_l
                                   CUDA_R_32F,
                                   cublasGemmAlgo_t(-1));
             gpu_sync(stream_);
+
+            // DEBUG: Print top 10 logits for last position
+            {
+                // Copy first token's logits to CPU and find top 10
+                std::vector<float> logits_cpu(vocab_size_padded_);
+                // For context phase, we want the last position (n_hidden_states is total positions)
+                // lp_logits_buf_ is [n_hidden_states, vocab_size_padded_] in row major
+                // Last position is at offset (n_hidden_states-1) * vocab_size_padded_
+                size_t last_pos_offset = (n_hidden_states - 1) * vocab_size_padded_;
+                cudaMemcpyAsync(logits_cpu.data(), lp_logits_buf_ + last_pos_offset,
+                               vocab_size_padded_ * sizeof(float), cudaMemcpyDeviceToHost, stream_);
+                cudaStreamSynchronize(stream_);
+
+                // Find top 10
+                std::vector<std::pair<float, int>> logit_pairs;
+                for (int i = 0; i < static_cast<int>(vocab_size_padded_); i++) {
+                    logit_pairs.push_back({logits_cpu[i], i});
+                }
+                std::partial_sort(logit_pairs.begin(), logit_pairs.begin() + 10, logit_pairs.end(),
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+                printf("[FT][DEBUG] Context lm_head logits (last position, n_hidden_states=%zu):\n", n_hidden_states);
+                printf("[FT][DEBUG]   Top 10: ");
+                for (int i = 0; i < 10; i++) {
+                    printf("[%d]=%.4f ", logit_pairs[i].second, logit_pairs[i].first);
+                }
+                printf("\n");
+                printf("[FT][DEBUG]   logit[389]=' on'=%.4f, logit[63861]=garbage=%.4f\n",
+                       logits_cpu[389], logits_cpu[63861]);
+                fflush(stdout);
+            }
         }
         else {
             // TODO: check sync
@@ -669,6 +731,31 @@ bool ParallelGpt<T>::triggerRecovery(int from_step, int ubatch_id)
 
     // Update the generation step
     step_ = target_step;
+
+    // Restore CURAND state from ring buffer at the target step.
+    // We saved AFTER each forward(), so ring[i] = state after step (step_start + i) completed.
+    // To re-run target_step, we need the state from BEFORE target_step ran,
+    // i.e., the state AFTER (target_step - 1) ran = ring[target_step - step_start - 1].
+    // If target_step == step_start, CURAND gets re-initialized from seed inside forward(), so skip.
+    if (curand_ring_topk_ != nullptr && curand_ring_batch_size_ > 0
+        && target_step > curand_ring_step_start_) {
+        size_t ring_idx = (size_t)(target_step - curand_ring_step_start_ - 1);
+        if (ring_idx < curand_ring_max_steps_) {
+            size_t state_sz = dynamic_decode_layer_->getCurandStateSizeBytes(curand_ring_batch_size_);
+            size_t offset   = ring_idx * state_sz;
+            dynamic_decode_layer_->restoreCurandState(
+                (const char*)curand_ring_topk_ + offset,
+                (const char*)curand_ring_topp_ + offset,
+                curand_ring_batch_size_, stream_);
+            cudaStreamSynchronize(stream_);
+            printf("[FT][CURAND] Restored CURAND state from ring_idx=%zu (target_step=%d)\n", ring_idx, target_step);
+        } else {
+            printf("[FT][CURAND] WARNING: ring_idx=%zu out of bounds (max=%zu), cannot restore CURAND state\n",
+                   ring_idx, curand_ring_max_steps_);
+        }
+    } else if (target_step == curand_ring_step_start_) {
+        printf("[FT][CURAND] target_step == step_start (%d), CURAND will be re-initialized from seed\n", target_step);
+    }
 
     printf("[FT][Recovery] Recovery initiated successfully, step reset to %d\n", step_);
     return true;
@@ -992,6 +1079,7 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
 
     PUSH_RANGE("buffer allocation");
     const int step_start = (continue_gen) ? initial_step : max_input_length;
+    curand_ring_step_start_ = step_start;
 
     if (!continue_gen) {
 
@@ -1104,6 +1192,45 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
             sync_check_cuda_error();
         }
         POP_RANGE;
+
+        // DIAGNOSTIC: One-time weight verification
+        {
+            // Check lm_head weight
+            const int check_rows[] = {0, 63861};
+            for (int r = 0; r < 2; r++) {
+                std::vector<half> h_row(8);
+                cudaMemcpy(h_row.data(),
+                           padded_embedding_kernel_ptr_ + (size_t)check_rows[r] * hidden_units_,
+                           sizeof(half) * 8, cudaMemcpyDeviceToHost);
+                float vals[8];
+                for (int i = 0; i < 8; i++) vals[i] = __half2float(h_row[i]);
+                printf("[FT][WEIGHT] lm_head row %d first8=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                       check_rows[r], vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+            }
+            // Check post_decoder_layernorm gamma
+            if (gpt_weights->post_decoder_layernorm.gamma) {
+                std::vector<half> h_gamma(8);
+                cudaMemcpy(h_gamma.data(), gpt_weights->post_decoder_layernorm.gamma,
+                           sizeof(half) * 8, cudaMemcpyDeviceToHost);
+                float gvals[8];
+                for (int i = 0; i < 8; i++) gvals[i] = __half2float(h_gamma[i]);
+                printf("[FT][WEIGHT] post_decoder_layernorm.gamma first8=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                       gvals[0], gvals[1], gvals[2], gvals[3], gvals[4], gvals[5], gvals[6], gvals[7]);
+            }
+            // Check embedding table
+            const int emb_check_ids[] = {5050, 8896, 374};
+            for (int e = 0; e < 3; e++) {
+                std::vector<half> h_emb(8);
+                cudaMemcpy(h_emb.data(),
+                           gpt_weights->pre_decoder_embedding_table + (size_t)emb_check_ids[e] * hidden_units_,
+                           sizeof(half) * 8, cudaMemcpyDeviceToHost);
+                float evals[8];
+                for (int i = 0; i < 8; i++) evals[i] = __half2float(h_emb[i]);
+                printf("[FT][WEIGHT] embed[%d] first8=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                       emb_check_ids[e], evals[0], evals[1], evals[2], evals[3], evals[4], evals[5], evals[6], evals[7]);
+            }
+            fflush(stdout);
+        }
 
         int  compact_size;
         bool use_shared_contexts = (shared_contexts_ratio_ > 0.0f) && (max_input_length >= 1) && (batch_size > 1);
@@ -1328,6 +1455,29 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
             gpt_context_decoder_->forward(
                 &decoder_output_tensors, &decoder_input_tensors, &gpt_weights->decoder_layer_weights);
             gpu_sync(stream_);
+
+            // DIAGNOSTIC: Print decoder_output_buf_ (last_token_hidden_units) after context decoder
+            {
+                const int diag_n = (int)hidden_units_;
+                std::vector<half> h_buf(diag_n);
+                cudaMemcpy(h_buf.data(), decoder_output_buf_, sizeof(half) * diag_n, cudaMemcpyDeviceToHost);
+                float norm = 0.0f;
+                bool has_nan = false, has_inf = false;
+                std::vector<float> fvals(diag_n);
+                for (int i = 0; i < diag_n; i++) {
+                    fvals[i] = __half2float(h_buf[i]);
+                    norm += fvals[i] * fvals[i];
+                    if (std::isnan(fvals[i])) has_nan = true;
+                    if (std::isinf(fvals[i])) has_inf = true;
+                }
+                norm = sqrtf(norm);
+                printf("[FT][CTX_OUT] decoder_output_buf_ (last_token_hidden): norm=%.4f, NaN=%d, Inf=%d, "
+                       "first8=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                       norm, (int)has_nan, (int)has_inf,
+                       fvals[0], fvals[1], fvals[2], fvals[3], fvals[4], fvals[5], fvals[6], fvals[7]);
+                fflush(stdout);
+            }
+
             auto                         endp    = high_resolution_clock::now();
             duration<double, std::milli> ms_temp = endp - startp;
 
@@ -1765,19 +1915,29 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                     gpt_variant_params_.has_post_decoder_layernorm ? normed_decoder_output_buf_ : decoder_output_buf_;
 
                 if (gpt_variant_params_.has_post_decoder_layernorm) {
-                    // Use opt_version=0 to handle nullptr beta (RMSNorm has no beta)
-                    // The optimized path (opt_version > 0) has hardcoded IS_BETA=true which crashes on nullptr
-                    invokeGeneralLayerNorm(normed_decoder_output_buf_ + hidden_units_offset,
-                                           decoder_output_buf_ + hidden_units_offset,
-                                           gpt_weights->post_decoder_layernorm.gamma,
-                                           gpt_weights->post_decoder_layernorm.beta,
-                                           layernorm_eps_,
-                                           local_batch_size * beam_width,
-                                           hidden_units_,
-                                           (float*)nullptr,
-                                           0,
-                                           stream_,
-                                           0);  // opt_version=0: use non-optimized kernel that handles nullptr beta
+                    if (gpt_weights->post_decoder_layernorm.beta == nullptr) {
+                        // RMSNorm path (Qwen3, LLaMA, etc.)
+                        invokeGeneralT5LayerNorm(normed_decoder_output_buf_ + hidden_units_offset,
+                                                 decoder_output_buf_ + hidden_units_offset,
+                                                 gpt_weights->post_decoder_layernorm.gamma,
+                                                 (const T*)nullptr,
+                                                 layernorm_eps_,
+                                                 local_batch_size * beam_width,
+                                                 hidden_units_,
+                                                 stream_);
+                    } else {
+                        invokeGeneralLayerNorm(normed_decoder_output_buf_ + hidden_units_offset,
+                                               decoder_output_buf_ + hidden_units_offset,
+                                               gpt_weights->post_decoder_layernorm.gamma,
+                                               gpt_weights->post_decoder_layernorm.beta,
+                                               layernorm_eps_,
+                                               local_batch_size * beam_width,
+                                               hidden_units_,
+                                               (float*)nullptr,
+                                               0,
+                                               stream_,
+                                               2);
+                    }
                 }
                 gpu_sync(stream_);
                 {
@@ -1789,6 +1949,29 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                     }
                 }
                 printf("[FT][DEBUG] step=%d: post-decoder layernorm done\n", step_); fflush(stdout);
+
+                // DIAGNOSTIC: Print hidden state going into lm_head GEMM
+                {
+                    T* diag_ptr = decoder_output_final_buf + hidden_units_offset;
+                    const int diag_n = (int)hidden_units_;
+                    std::vector<half> h_buf(diag_n);
+                    cudaMemcpy(h_buf.data(), diag_ptr, sizeof(half) * diag_n, cudaMemcpyDeviceToHost);
+                    float norm = 0.0f;
+                    bool has_nan = false, has_inf = false;
+                    std::vector<float> fvals(diag_n);
+                    for (int i = 0; i < diag_n; i++) {
+                        fvals[i] = __half2float(h_buf[i]);
+                        norm += fvals[i] * fvals[i];
+                        if (std::isnan(fvals[i])) has_nan = true;
+                        if (std::isinf(fvals[i])) has_inf = true;
+                    }
+                    norm = sqrtf(norm);
+                    printf("[FT][LM_INPUT] step=%d: norm=%.4f, NaN=%d, Inf=%d, "
+                           "first8=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                           step_, norm, (int)has_nan, (int)has_inf,
+                           fvals[0], fvals[1], fvals[2], fvals[3], fvals[4], fvals[5], fvals[6], fvals[7]);
+                    fflush(stdout);
+                }
                 POP_RANGE;
 
                 if (tensor_para_.world_size_ == 1) {
@@ -1988,6 +2171,21 @@ void ParallelGpt<T>::forward(std::unordered_map<std::string, Tensor>*       outp
                     }
                 }
                 printf("[FT][DEBUG] step=%d: dynamic_decode COMPLETED\n", step_); fflush(stdout);
+
+                // Save CURAND state to ring buffer for checkpoint recovery
+                if (enable_delta_checkpoint_ && curand_ring_topk_ != nullptr) {
+                    size_t state_sz = dynamic_decode_layer_->getCurandStateSizeBytes(batch_size * beam_width);
+                    size_t ring_idx = (size_t)(step_ - step_start);
+                    if (ring_idx < curand_ring_max_steps_) {
+                        size_t offset = ring_idx * state_sz;
+                        dynamic_decode_layer_->saveCurandState(
+                            (char*)curand_ring_topk_ + offset,
+                            (char*)curand_ring_topp_ + offset,
+                            batch_size * beam_width, stream_);
+                        printf("[FT][CURAND] Saved CURAND state at ring_idx=%zu (step=%d)\n", ring_idx, step_);
+                    }
+                }
+
                 generation_should_stop &= subbatch_should_stop;
                 microbatch_should_stop_[ite] = subbatch_should_stop;
                 printf("MICROBATCH_SHOULD_STOP IS %d\n", microbatch_should_stop_[ite]);

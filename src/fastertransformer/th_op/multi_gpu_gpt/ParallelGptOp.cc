@@ -50,6 +50,7 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                              const bool                    has_adapters,
                              const int64_t                 adapter_inter_size,
                              const bool                    use_attention_linear_bias,
+                             const bool                    neox_rotary_style,
                              const std::vector<th::Tensor> weights,
                              const std::vector<th::Tensor> int8_weights,
                              const std::vector<th::Tensor> scale,
@@ -108,7 +109,8 @@ ParallelGptOp::ParallelGptOp(const int64_t                 head_num,
                                             has_post_decoder_layernorm,
                                             has_adapters,
                                             (size_t)adapter_inter_size,
-                                            use_attention_linear_bias};
+                                            use_attention_linear_bias,
+                                            neox_rotary_style};
 
     switch (st_) {
         case at::ScalarType::Float:
@@ -310,6 +312,7 @@ static auto fasterTransformerParallelGptTHS =
                               bool,
                               bool,
                               int64_t,
+                              bool,
                               bool,
                               std::vector<th::Tensor>,
                               std::vector<th::Tensor>,

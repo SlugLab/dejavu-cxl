@@ -317,9 +317,18 @@ void BaseSamplingLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_t
     const T* embedding_bias =
         input_tensors->isExist("embedding_bias") ? input_tensors->at("embedding_bias").getPtr<T>() : nullptr;
     if (embedding_bias != nullptr || !ALL_OF(temperature_ + ite * local_batch_size, local_batch_size, float, 1.0f)) {
-        // Readback GPU temperature_buf_ to verify it hasn't been corrupted
+        // Re-apply CPU-side temperature values to GPU buffer before use.
+        // The GPU buffer gets corrupted by model operations between setup() and forward().
+        cudaMemcpyAsync(temperature_buf_ + ite * local_batch_size,
+                        temperature_ + ite * local_batch_size,
+                        sizeof(float) * local_batch_size,
+                        cudaMemcpyHostToDevice,
+                        stream_);
+
+        // Readback GPU temperature_buf_ to verify restoration worked
         {
             float gpu_temp_val = -999.0f;
+            cudaStreamSynchronize(stream_);
             cudaMemcpy(&gpu_temp_val, temperature_buf_ + ite * local_batch_size, sizeof(float), cudaMemcpyDeviceToHost);
             printf("[FT][BaseSamp] step=%d: applying temperature penalty (CPU temp=%.3f, GPU temp_buf=%.6f, "
                    "temp_buf_ptr=%p, vocab=%zu, vocab_pad=%zu, ite=%d, this=%p)\n",
@@ -350,6 +359,12 @@ void BaseSamplingLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_t
     if (step > 1 && repetition_penalty_type_ != RepetitionPenaltyType::None) {
         float default_value = getDefaultPenaltyValue(repetition_penalty_type_);
         if (!ALL_OF(repetition_penalty_ + ite * local_batch_size, local_batch_size, float, default_value)) {
+            // Re-apply CPU-side repetition_penalty values to GPU buffer before use.
+            cudaMemcpyAsync(repetition_penalty_buf_ + ite * local_batch_size,
+                            repetition_penalty_ + ite * local_batch_size,
+                            sizeof(float) * local_batch_size,
+                            cudaMemcpyHostToDevice,
+                            stream_);
             invokeBatchApplyRepetitionPenalty(
                 logits,
                 repetition_penalty_buf_ + ite * local_batch_size,

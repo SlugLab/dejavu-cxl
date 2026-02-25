@@ -85,6 +85,10 @@ public:
     void forward(std::unordered_map<std::string, Tensor>*       output_tensors,
                  const std::unordered_map<std::string, Tensor>* input_tensors) override;
     void forward(TensorMap* output_tensors, TensorMap* input_tensors) override;
+
+    // CURAND state accessors for checkpoint/recovery
+    curandState_t* getCurandStatePtr() const { return curandstate_buf_; }
+    size_t getCurandStateSizeBytes(size_t batch_size) const { return sizeof(curandState_t) * batch_size; }
 };
 
 }  // namespace fastertransformer

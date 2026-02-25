@@ -164,6 +164,19 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
 
     CUDACHECK(cudaStreamSynchronize(stream_)); //sync_check_cuda_error();
 
+    // QKNorm: apply per-head RMSNorm to Q and K before RoPE (Qwen3 and similar models)
+    if (attention_weights->q_norm_weight != nullptr && attention_weights->k_norm_weight != nullptr) {
+        invokeQKNorm(qkv_buf_,
+                     attention_weights->q_norm_weight,
+                     attention_weights->k_norm_weight,
+                     m,
+                     local_head_num_,
+                     size_per_head_,
+                     1e-6f,
+                     stream_);
+        CUDACHECK(cudaStreamSynchronize(stream_));
+    }
+
     // IDEA: append prefix prompt key value here
     PrefixPromptBatchWeightsParam<T> param{d_prefix_prompt_batch,
                                            d_prefix_prompt_lengths,

@@ -52,6 +52,7 @@ private:
 
     // RoPE
     size_t               rotary_embedding_dim_ = 0;
+    bool                 neox_rotary_style_    = false;
 
     // adapter
     bool   has_adapters_;

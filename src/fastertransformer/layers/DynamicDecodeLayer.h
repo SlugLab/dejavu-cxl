@@ -19,6 +19,8 @@
 #include <string>
 #include <unordered_map>
 
+#include <curand_kernel.h>
+
 #include "src/fastertransformer/kernels/beam_search_topk_kernels.h"
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/DynamicDecodeBaseLayer.h"
@@ -72,6 +74,12 @@ public:
     void forward(TensorMap* output_tensors, TensorMap* input_tensors);
     void forward(std::unordered_map<std::string, Tensor>*       output_tensors,
                  const std::unordered_map<std::string, Tensor>* input_tensors);
+
+    // CURAND state save/restore for checkpoint recovery.
+    // dst_topk/dst_topp must point to GPU memory of getCurandStateSizeBytes() each.
+    size_t getCurandStateSizeBytes(size_t batch_size) const;
+    void saveCurandState(void* dst_topk, void* dst_topp, size_t batch_size, cudaStream_t stream) const;
+    void restoreCurandState(const void* src_topk, const void* src_topp, size_t batch_size, cudaStream_t stream);
 };
 
 }  // namespace fastertransformer
